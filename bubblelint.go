@@ -21,9 +21,9 @@ type Options struct {
 	Suggest     bool
 }
 
-// New returns an independent analyzer. Nil enables misuse checks only.
+// New returns an independent analyzer. Nil enables all checks.
 func New(options *Options) *analysis.Analyzer {
-	settings := Options{CheckMisuse: true}
+	settings := Options{CheckMisuse: true, Suggest: true}
 	if options != nil {
 		settings = *options
 	}
@@ -32,7 +32,7 @@ func New(options *Options) *analysis.Analyzer {
 		Doc:  "check testing/synctest usage and find timeout-based concurrent tests",
 	}
 	a.Flags.BoolVar(&settings.CheckMisuse, "check-misuse", settings.CheckMisuse, "check definite synctest misuse on known test call paths")
-	a.Flags.BoolVar(&settings.Suggest, "suggest", settings.Suggest, "suggest concurrent tests to consider migrating to synctest")
+	a.Flags.BoolVar(&settings.Suggest, "suggest", settings.Suggest, "report synctest migration suggestions (ST100, ST101)")
 	a.Run = func(pass *analysis.Pass) (any, error) {
 		if settings.CheckMisuse || settings.Suggest {
 			newChecker(pass, settings).run()

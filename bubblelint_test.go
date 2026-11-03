@@ -13,7 +13,7 @@ func TestAnalyzer(t *testing.T) {
 		options *Options
 		pkg     string
 	}{
-		{"misuse", nil, "misuse"},
+		{"misuse", &Options{CheckMisuse: true}, "misuse"},
 		{"migration", &Options{Suggest: true}, "migration"},
 		{"clean", &Options{CheckMisuse: true, Suggest: true}, "clean"},
 		{"disabled", &Options{}, "disabled"},
@@ -31,13 +31,13 @@ func TestAnalyzer(t *testing.T) {
 
 func TestIndependentFlags(t *testing.T) {
 	first, second := New(nil), New(nil)
-	if err := first.Flags.Set("suggest", "true"); err != nil {
+	if err := first.Flags.Set("suggest", "false"); err != nil {
 		t.Fatal(err)
 	}
 	if err := first.Flags.Set("check-misuse", "false"); err != nil {
 		t.Fatal(err)
 	}
-	if second.Flags.Lookup("suggest").Value.String() != "false" || second.Flags.Lookup("check-misuse").Value.String() != "true" {
+	if second.Flags.Lookup("suggest").Value.String() != "true" || second.Flags.Lookup("check-misuse").Value.String() != "true" {
 		t.Fatal("analyzers share mutable settings")
 	}
 }

@@ -46,10 +46,10 @@ func TestCLI(t *testing.T) {
 		args  []string
 		codes []string
 	}{
-		{"defaults", nil, []string{"ST001", "ST002", "ST003"}},
-		{"misuse-only", []string{"-check-misuse=true", "-suggest=false"}, []string{"ST001", "ST002", "ST003"}},
-		{"all-enabled", []string{"-suggest=true"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"suggest-only", []string{"-check-misuse=false", "-suggest=true"}, []string{"ST100", "ST101"}},
+		{"defaults", nil, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"misuse-only", []string{"-suggest=false"}, []string{"ST001", "ST002", "ST003"}},
+		{"all-enabled", []string{"-check-misuse=true", "-suggest=true"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"suggest-only", []string{"-check-misuse=false"}, []string{"ST100", "ST101"}},
 		{"all-disabled", []string{"-check-misuse=false", "-suggest=false"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,17 +96,17 @@ func TestGolangciLint(t *testing.T) {
 		name, settings, exclusions, pkg string
 		codes                           []string
 	}{
-		{"defaults", "", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
-		{"misuse-only", "check-misuse: true\n          suggest: false", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
-		{"all-enabled", "suggest: true", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"suggest-only", "check-misuse: false\n          suggest: true", "", "integration_cases", []string{"ST100", "ST101"}},
+		{"defaults", "", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"misuse-only", "suggest: false", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
+		{"all-enabled", "check-misuse: true\n          suggest: true", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"suggest-only", "check-misuse: false", "", "integration_cases", []string{"ST100", "ST101"}},
 		{"all-disabled", "check-misuse: false\n          suggest: false", "", "integration_cases", nil},
-		{"misuse-regressions", "suggest: true", "", "misuse", []string{"ST001", "ST002", "ST003"}},
-		{"migration-regressions", "suggest: true", "", "migration", []string{"ST100", "ST101"}},
-		{"clean", "suggest: true", "", "clean", nil},
+		{"misuse-regressions", "", "", "misuse", []string{"ST001", "ST002", "ST003"}},
+		{"migration-regressions", "", "", "migration", []string{"ST100", "ST101"}},
+		{"clean", "", "", "clean", nil},
 		{"nolint", "", "", "integration_nolint", []string{"ST001"}},
 		{
-			"configured-exclusion", "suggest: true",
+			"configured-exclusion", "",
 			"    rules:\n      - path: 'integration_cases/.*\\.go$'\n        linters: [bubblelint]\n        text: 'ST001:'\n",
 			"integration_cases", []string{"ST002", "ST003", "ST100", "ST101"},
 		},

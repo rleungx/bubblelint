@@ -1,14 +1,14 @@
 # bubblelint
 
 A linter for Go tests using `testing/synctest`. Find incorrect synctest calls
-and get optional suggestions for tests that could use virtual time.
+and tests that could use virtual time.
 
 ## Get started
 
 Requires Go 1.26 or newer. Use a newer toolchain if your project requires it.
 
 ```sh
-go install github.com/rleungx/bubblelint/cmd/bubblelint@v0.1.0
+go install github.com/rleungx/bubblelint/cmd/bubblelint@main
 ```
 
 Run in your project's module directory:
@@ -39,45 +39,36 @@ func TestWorker(t *testing.T) {
 
 ## Checks
 
-These checks run by default:
+All five checks run by default:
 
 | Code | What it finds |
 | --- | --- |
 | ST001 | `synctest.Wait` or Go 1.27+ `synctest.Sleep` called outside a bubble. |
 | ST002 | A synctest bubble started inside another bubble. |
 | ST003 | `Run`, `Parallel`, or `Deadline` called on the `*testing.T` provided by `synctest.Test`. |
+| ST100 | Sleeps used after starting asynchronous work. |
+| ST101 | Channel checks that use timeouts. |
 
-To also find tests that may benefit from synctest:
+ST100 and ST101 suggest tests that may benefit from synctest. Review these
+suggestions, especially when a test depends on real network I/O or timing
+behavior. To check only incorrect synctest usage:
 
 ```sh
-bubblelint -suggest ./...
+bubblelint -suggest=false ./...
 ```
-
-This adds **ST100** for sleeps after starting asynchronous work and **ST101**
-for channel checks that use timeouts. Review these suggestions before applying
-them, especially when a test depends on real network I/O or timing behavior.
 
 ## Automatic fixes
 
-Automatic fixes are available on `main`. Install the latest code, apply fixes,
-then check for any remaining findings:
+Apply supported fixes, check for remaining findings, and run your tests:
 
 ```sh
-go install github.com/rleungx/bubblelint/cmd/bubblelint@main
 bubblelint -fix ./...
 bubblelint ./...
+go test ./...
 ```
 
 This removes unsupported `t.Parallel()` statements directly inside inline
-`synctest.Test` callbacks.
-
-To also migrate simple concurrent tests to `synctest.Test`:
-
-```sh
-bubblelint -suggest -fix ./...
-bubblelint -suggest ./...
-go test ./...
-```
+`synctest.Test` callbacks and migrates eligible concurrent tests to synctest.
 
 Migration fixes cover simple tests whose goroutines finish by closing or sending
 to local channels:
@@ -124,7 +115,7 @@ linters:
         type: module
         settings:
           check-misuse: true # Check incorrect synctest calls.
-          suggest: false # Set to true for migration suggestions.
+          suggest: true # Set to false to skip migration suggestions.
 ```
 
 Run the custom binary in your project's directory:
@@ -139,8 +130,6 @@ Add `--fix` to apply the same automatic fixes:
 ```sh
 /path/to/bubblelint/bin/golangci-lint-bubble run --fix ./...
 ```
-
-Set `suggest: true` in the settings above to include migration fixes.
 
 </details>
 

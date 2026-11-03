@@ -126,7 +126,7 @@ func TestAutofix(t *testing.T) {
 				checkAutofixUnchanged(t, path, fixed)
 			})
 
-			t.Run("disabled-checks", func(t *testing.T) {
+			t.Run("disabled-misuse-checks", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, autofixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.run(t, dir, true, true, "")

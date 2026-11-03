@@ -198,9 +198,9 @@ func TestTimeoutMigrationFix(t *testing.T) {
 			migrated := []string{"TestClose", "TestSend", "TestCommaOK", "TestSleepAndTimeout", "TestFinalWorker"}
 
 			for _, alias := range []string{"", "st"} {
-				name, source := "add-import", timeoutFixSource
+				name, source := "defaults-add-import", timeoutFixSource
 				if alias != "" {
-					name = "reuse-import-alias"
+					name = "defaults-reuse-import-alias"
 					source = strings.Replace(source, `"testing"`, "\"testing\"\n\tst \"testing/synctest\"", 1)
 					source += "\nfunc existingBubble(t *testing.T) { st.Test(t, func(t *testing.T) {}) }\n"
 				}
@@ -233,7 +233,7 @@ func TestTimeoutMigrationFix(t *testing.T) {
 				})
 			}
 
-			t.Run("suggest-is-opt-in", func(t *testing.T) {
+			t.Run("disabled-suggestions", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, timeoutFixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.runMigration(t, dir, true, false, "")

@@ -82,19 +82,21 @@ func TestTimeout(t *testing.T) {
 
 func (d autofixDriver) runMigration(t *testing.T, dir string, fix, suggest bool, exclusions string) (string, string, int) {
 	t.Helper()
+	// Exercise the drivers' defaults for enabled suggestions. Disabling them
+	// requires an explicit false setting so omitted settings stay covered.
 	var args []string
 	if d.golangci {
 		settings := ""
-		if suggest {
-			settings = "suggest: true"
+		if !suggest {
+			settings = "suggest: false"
 		}
 		args = []string{"run", "--config", writeConfig(t, settings, exclusions), "--show-stats=false"}
 		if fix {
 			args = append(args, "--fix")
 		}
 	} else {
-		if suggest {
-			args = append(args, "-suggest")
+		if !suggest {
+			args = append(args, "-suggest=false")
 		}
 		if fix {
 			args = append(args, "-fix")
@@ -124,10 +126,10 @@ func TestMigrationFix(t *testing.T) {
 			}
 
 			for _, alias := range []string{"", "st"} {
-				name := "add-import"
+				name := "defaults-add-import"
 				source := migrationFixSource
 				if alias != "" {
-					name = "reuse-import-alias"
+					name = "defaults-reuse-import-alias"
 					source = strings.Replace(source, `"testing"`, "\"testing\"\n\tst \"testing/synctest\"", 1)
 					source += "\nfunc existingBubble(t *testing.T) { st.Test(t, func(t *testing.T) {}) }\n"
 				}
@@ -159,7 +161,7 @@ func TestMigrationFix(t *testing.T) {
 				})
 			}
 
-			t.Run("suggest-is-opt-in", func(t *testing.T) {
+			t.Run("disabled-suggestions", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, migrationFixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.runMigration(t, dir, true, false, "")

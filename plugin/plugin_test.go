@@ -17,9 +17,11 @@ func TestPlugin(t *testing.T) {
 		misuse, suggest string
 		wantError       bool
 	}{
-		{"defaults", nil, "true", "false", false},
+		{"defaults", nil, "true", "true", false},
+		{"empty-settings", map[string]any{}, "true", "true", false},
+		{"misuse-only", map[string]any{"suggest": false}, "true", "false", false},
 		{"suggestions", map[string]any{"suggest": true}, "true", "true", false},
-		{"only-suggestions", map[string]any{"suggest": true, "check-misuse": false}, "false", "true", false},
+		{"only-suggestions", map[string]any{"check-misuse": false}, "false", "true", false},
 		{"all-disabled", map[string]any{"suggest": false, "check-misuse": false}, "false", "false", false},
 		{"unknown-key", map[string]any{"sugest": true}, "", "", true},
 		{"wrong-type", map[string]any{"suggest": "true"}, "", "", true},

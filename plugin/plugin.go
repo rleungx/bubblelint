@@ -14,7 +14,7 @@ func init() {
 // Settings is decoded strictly so misspelled settings fail configuration.
 type Settings struct {
 	CheckMisuse *bool `json:"check-misuse"`
-	Suggest     bool  `json:"suggest"`
+	Suggest     *bool `json:"suggest"`
 }
 
 type plugin struct {
@@ -27,9 +27,12 @@ func New(raw any) (register.LinterPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := bubblelint.Options{CheckMisuse: true, Suggest: settings.Suggest}
+	options := bubblelint.Options{CheckMisuse: true, Suggest: true}
 	if settings.CheckMisuse != nil {
 		options.CheckMisuse = *settings.CheckMisuse
+	}
+	if settings.Suggest != nil {
+		options.Suggest = *settings.Suggest
 	}
 	return &plugin{options: options}, nil
 }
