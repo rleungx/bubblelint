@@ -91,6 +91,27 @@ func TestAutofix(t *testing.T) {
 				diagnosticExit = 1
 			}
 
+			if !driver.golangci {
+				t.Run("preview-diff", func(t *testing.T) {
+					dir, path := writeAutofixModule(t, autofixSource)
+					original := readAutofixFile(t, path)
+					stdout, stderr, exit := runCommand(t, dir, driver.binary, "-fix", "-diff", "./...")
+					checkAutofixExit(t, exit, 0, stdout, stderr)
+					for _, fragment := range []string{
+						"--- " + path + " (old)",
+						"+++ " + path + " (new)",
+						"@@ ",
+						"-\t\tbt.Parallel() // Keep this comment.",
+						"+\t\t// Keep this comment.",
+					} {
+						if !strings.Contains(stdout, fragment) {
+							t.Errorf("preview is missing %q\nstdout:\n%s\nstderr:\n%s", fragment, stdout, stderr)
+						}
+					}
+					checkAutofixUnchanged(t, path, original)
+				})
+			}
+
 			t.Run("apply-and-repeat", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, autofixSource)
 				original := readAutofixFile(t, path)

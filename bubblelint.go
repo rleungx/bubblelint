@@ -49,18 +49,20 @@ type testContext struct {
 }
 
 type state struct {
-	bubble     bool
-	background bool
-	async      bool
-	tests      map[types.Object]testContext
+	bubble        bool
+	background    bool
+	async         bool
+	suppressSleep bool
+	tests         map[types.Object]testContext
 }
 
 type visitKey struct {
-	body       *ast.BlockStmt
-	bubble     bool
-	background bool
-	async      bool
-	bindings   string
+	body          *ast.BlockStmt
+	bubble        bool
+	background    bool
+	async         bool
+	suppressSleep bool
+	bindings      string
 }
 
 type checker struct {
@@ -96,7 +98,7 @@ func (c *checker) run() {
 			continue
 		}
 		for _, decl := range file.Decls {
-			if n, ok := decl.(*ast.FuncDecl); ok && n.Body != nil && n.Recv == nil {
+			if n, ok := decl.(*ast.FuncDecl); ok && n.Body != nil {
 				obj, _ := c.pass.TypesInfo.Defs[n.Name].(*types.Func)
 				fn := function{n.Body, n.Type.Params}
 				c.functions[obj] = fn
@@ -210,7 +212,7 @@ func (c *checker) run() {
 }
 
 func (c *checker) isTest(fn *ast.FuncDecl, file *ast.File) bool {
-	if !strings.HasSuffix(c.pass.Fset.Position(file.Pos()).Filename, "_test.go") ||
+	if fn.Recv != nil || !strings.HasSuffix(c.pass.Fset.Position(file.Pos()).Filename, "_test.go") ||
 		!strings.HasPrefix(fn.Name.Name, "Test") {
 		return false
 	}
@@ -420,43 +422,15 @@ func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testC
 		}
 		keyText.WriteByte(',')
 	}
-	key := visitKey{fn.body, s.bubble, s.background, s.async, keyText.String()}
+	key := visitKey{fn.body, s.bubble, s.background, s.async, s.suppressSleep, keyText.String()}
 	if result, seen := c.visited[key]; seen {
 		return result
 	}
 	// Seed the result before descending so recursive helpers terminate.
 	c.visited[key] = s.async
-	c.walk(fn.body, &s)
-	c.visited[key] = s.async
-	return s.async
-}
-
-func (c *checker) walk(node ast.Node, s *state) {
-	ast.Inspect(node, func(node ast.Node) bool {
-		switch n := node.(type) {
-		case *ast.FuncLit:
-			// A closure's location does not tell us where it executes.
-			return false
-		case *ast.GoStmt:
-			c.walk(n.Call.Fun, s)
-			for _, arg := range n.Call.Args {
-				c.walk(arg, s)
-			}
-			s.async = true
-			worker := *s
-			worker.background = true
-			c.call(n.Call, &worker)
-			return false
-		case *ast.CallExpr:
-			c.walk(n.Fun, s)
-			for _, arg := range n.Args {
-				c.walk(arg, s)
-			}
-			c.call(n, s)
-			return false
-		}
-		return true
-	})
+	result := c.flowBody(fn.body, s)
+	c.visited[key] = result
+	return result
 }
 
 func (c *checker) call(call *ast.CallExpr, s *state) {
@@ -481,7 +455,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 	}
 	c.checkBubbleOnly(call.Fun, call, *s)
 	if c.checks&migrationChecks != 0 && !s.bubble && !s.background && c.supportsSynctest() {
-		if c.checks&checkST100 != 0 && s.async && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
+		if c.checks&checkST100 != 0 && s.async && !s.suppressSleep && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}
 		if c.timeouts[call] {
@@ -498,32 +472,34 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			c.callback(call.Args[1], worker, nil)
 		}
 	}
-	if fn, receiver, args := c.methodCall(call); fn != nil && fn.Pkg() != nil {
-		if fn.Pkg().Path() == "sync" && fn.Name() == "Go" && len(args) == 1 {
+	method, receiver, args := c.methodCall(call)
+	if method != nil && method.Pkg() != nil {
+		if method.Pkg().Path() == "sync" && method.Name() == "Go" && len(args) == 1 {
 			s.async = true
 			worker := *s
 			worker.background = true
 			c.callback(args[0], worker, nil)
 		}
-		if fn.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(receiver)) {
+		if method.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(receiver)) {
 			context, known := c.testContext(receiver, *s)
 			if known && context.synctest && c.checks&checkST003 != 0 {
-				switch fn.Name() {
+				switch method.Name() {
 				case "Run", "Parallel", "Deadline":
-					c.report(call, "ST003", "testing.T."+fn.Name()+" must not be called on the *testing.T provided by synctest.Test", c.parallelFixes[call]...)
+					c.report(call, "ST003", "testing.T."+method.Name()+" must not be called on the *testing.T provided by synctest.Test", c.parallelFixes[call]...)
 				}
 			}
 			index := -1
-			if fn.Name() == "Run" {
+			if method.Name() == "Run" {
 				index = 1
-			} else if fn.Name() == "Cleanup" {
+			} else if method.Name() == "Cleanup" {
 				index = 0
 			}
 			if index >= 0 && index < len(args) {
 				inner := *s
 				inner.async = false
+				inner.suppressSleep = false
 				var callbackT *testContext
-				if fn.Name() == "Cleanup" {
+				if method.Name() == "Cleanup" {
 					if !known {
 						return
 					}
@@ -539,7 +515,12 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		}
 	}
 	if fn, ok := c.callable(call.Fun); ok {
-		s.async = c.invoke(fn, *s, call.Args, nil) || s.async
+		if method == nil {
+			args = call.Args
+		}
+		// A method expression includes its receiver as the first argument,
+		// while the declaration's parameter list contains only explicit args.
+		s.async = c.invoke(fn, *s, args, nil) || s.async
 	}
 }
 

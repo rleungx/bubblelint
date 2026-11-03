@@ -66,6 +66,12 @@ Use `-checks=ST001,ST002,ST003` instead of `-suggest=false`, or
 
 ## Automatic fixes
 
+Preview supported fixes without changing files:
+
+```sh
+bubblelint -fix -diff ./...
+```
+
 Apply supported fixes, check for remaining findings, and run your tests:
 
 ```sh

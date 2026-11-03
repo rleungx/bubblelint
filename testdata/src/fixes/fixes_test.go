@@ -43,7 +43,7 @@ func TestUnsupported(t *testing.T) {
 		go bt.Parallel()          // want "ST003:"
 		if bt.Parallel(); true {  // want "ST003:"
 		}
-		for bt.Parallel(); false; bt.Parallel() { // want "ST003:" "ST003:"
+		for bt.Parallel(); testing.Short(); bt.Parallel() { // want "ST003:" "ST003:"
 		}
 		switch bt.Parallel(); 1 { // want "ST003:"
 		}
