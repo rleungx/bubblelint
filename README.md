@@ -57,6 +57,21 @@ This adds **ST100** for sleeps after starting asynchronous work and **ST101**
 for channel checks that use timeouts. Review these suggestions before applying
 them, especially when a test depends on real network I/O or timing behavior.
 
+## Automatic fixes
+
+Automatic fixes are available on `main`. Install the latest code, apply fixes,
+then check for any remaining findings:
+
+```sh
+go install github.com/rleungx/bubblelint/cmd/bubblelint@main
+bubblelint -fix ./...
+bubblelint ./...
+```
+
+This removes unsupported `t.Parallel()` statements directly inside inline
+`synctest.Test` callbacks. Calls through helpers or aliases, and all other
+findings, still need manual review.
+
 ## golangci-lint
 
 Use bubblelint with golangci-lint by building a custom binary that includes it.
@@ -67,7 +82,7 @@ Use bubblelint with golangci-lint by building a custom binary that includes it.
 With `golangci-lint` installed:
 
 ```sh
-git clone --branch v0.1.0 https://github.com/rleungx/bubblelint.git
+git clone https://github.com/rleungx/bubblelint.git
 cd bubblelint
 make custom
 ```
@@ -96,6 +111,12 @@ Run the custom binary in your project's directory:
 ```sh
 cd /path/to/your/project
 /path/to/bubblelint/bin/golangci-lint-bubble run ./...
+```
+
+Add `--fix` to apply the same automatic fixes:
+
+```sh
+/path/to/bubblelint/bin/golangci-lint-bubble run --fix ./...
 ```
 
 </details>

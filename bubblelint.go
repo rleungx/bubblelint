@@ -79,6 +79,8 @@ type checker struct {
 	visited   map[visitKey]bool
 	reported  map[token.Pos]map[string]bool
 	roots     []function
+
+	parallelFixes map[*ast.CallExpr][]analysis.SuggestedFix
 }
 
 func newChecker(pass *analysis.Pass, options Options) *checker {
@@ -187,6 +189,9 @@ func (c *checker) run() {
 		if entryBindings[obj] {
 			c.assigned[obj] = count > 1
 		}
+	}
+	if c.options.CheckMisuse {
+		c.findParallelFixes()
 	}
 	if c.options.Suggest {
 		for _, file := range c.pass.Files {
@@ -507,7 +512,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			if known && context.synctest && c.options.CheckMisuse {
 				switch fn.Name() {
 				case "Run", "Parallel", "Deadline":
-					c.report(call, "ST003", "testing.T."+fn.Name()+" must not be called on the *testing.T provided by synctest.Test")
+					c.report(call, "ST003", "testing.T."+fn.Name()+" must not be called on the *testing.T provided by synctest.Test", c.parallelFixes[call]...)
 				}
 			}
 			index := -1
@@ -592,7 +597,7 @@ func (c *checker) findTimeouts(stmt *ast.SelectStmt) {
 	}
 }
 
-func (c *checker) report(node ast.Node, code, message string) {
+func (c *checker) report(node ast.Node, code, message string, fixes ...analysis.SuggestedFix) {
 	if c.reported[node.Pos()] == nil {
 		c.reported[node.Pos()] = make(map[string]bool)
 	}
@@ -602,5 +607,6 @@ func (c *checker) report(node ast.Node, code, message string) {
 	c.reported[node.Pos()][code] = true
 	c.pass.Report(analysis.Diagnostic{
 		Pos: node.Pos(), End: node.End(), Category: code, Message: code + ": " + message,
+		SuggestedFixes: fixes,
 	})
 }

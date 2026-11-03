@@ -1,0 +1,142 @@
+package fixes
+
+import (
+	"testing"
+	"testing/synctest"
+	"time"
+)
+
+func TestDirect(t *testing.T) {
+	synctest.Test(t, func(bt *testing.T) {
+		// Keep the explanation before the removed call.
+		bt.Parallel()   // Keep the trailing comment. // want "ST003:"
+		(bt).Parallel() // want "ST003:"
+		if true {
+			bt.Parallel() // want "ST003:"
+		}
+		switch 1 {
+		case 1:
+			bt.Parallel() // want "ST003:"
+		}
+		select {
+		default:
+			bt.Parallel() // want "ST003:"
+		}
+		for range 1 {
+			bt.Parallel() // want "ST003:"
+		}
+	})
+}
+
+func TestSameLine(t *testing.T) {
+	synctest.Test(t, func(bt *testing.T) { bt.Log("before"); bt.Parallel(); bt.Log("after") }) // want "ST003:"
+}
+
+func TestUnsupported(t *testing.T) {
+	synctest.Test(t, func(bt *testing.T) {
+		alias := bt
+		alias.Parallel() // want "ST003:"
+		parallel := bt.Parallel
+		parallel()                // want "ST003:"
+		(*testing.T).Parallel(bt) // want "ST003:"
+		defer bt.Parallel()       // want "ST003:"
+		go bt.Parallel()          // want "ST003:"
+		if bt.Parallel(); true {  // want "ST003:"
+		}
+		for bt.Parallel(); false; bt.Parallel() { // want "ST003:" "ST003:"
+		}
+		switch bt.Parallel(); 1 { // want "ST003:"
+		}
+		goto label
+	label:
+		bt.Parallel()                          // want "ST003:"
+		bt.Parallel( /* keep this comment */ ) // want "ST003:"
+		func() {
+			bt.Parallel() // want "ST003:"
+		}()
+		_, _ = bt.Deadline()                   // want "ST003:"
+		bt.Run("child", func(t *testing.T) {}) // want "ST003:"
+		{
+			bt := t
+			bt.Parallel() // Ordinary T: no diagnostic or fix.
+		}
+	})
+}
+
+func TestReassigned(t *testing.T) {
+	synctest.Test(t, func(bt *testing.T) {
+		bt = t
+		bt.Parallel()
+	})
+	synctest.Test(t, func(bt *testing.T) {
+		ptr := &bt
+		*ptr = t
+		bt.Parallel()
+	})
+}
+
+func sharedFirst(t *testing.T) {
+	t.Parallel() // want "ST003:"
+}
+
+func sharedLast(t *testing.T) {
+	t.Parallel() // want "ST003:"
+}
+
+func named(t *testing.T) {
+	t.Parallel() // want "ST003:"
+}
+
+func TestShared(t *testing.T) {
+	sharedFirst(t)
+	synctest.Test(t, func(bt *testing.T) {
+		sharedFirst(bt)
+		sharedLast(bt)
+	})
+	sharedLast(t)
+	synctest.Test(t, named)
+	callback := func(bt *testing.T) {
+		bt.Parallel() // want "ST003:"
+	}
+	callback(t)
+	synctest.Test(t, callback)
+}
+
+func TestOtherRules(t *testing.T) {
+	synctest.Wait() // want "ST001:"
+	synctest.Test(t, func(bt *testing.T) {
+		synctest.Test(bt, func(*testing.T) {}) // want "ST002:"
+	})
+	ch := make(chan bool)
+	go func() { ch <- true }()
+	time.Sleep(time.Second) // want "ST100:"
+	select {
+	case <-ch:
+	case <-time.After(time.Second): // want "ST101:"
+	}
+}
+
+var TestAlias = synctest.Test
+
+func TestAliasedOwner(t *testing.T) {
+	TestAlias(t, func(bt *testing.T) {
+		bt.Parallel() // want "ST003:"
+	})
+	local := synctest.Test
+	local(t, func(bt *testing.T) {
+		bt.Parallel() // want "ST003:"
+	})
+}
+
+func TestDirectiveComments(t *testing.T) {
+	synctest.Test(t, func(bt *testing.T) {
+		bt.Parallel() //nolint:errcheck // want "ST003:"
+		bt.Log("must not inherit the previous nolint")
+		//nolint:errcheck
+		bt.Parallel() // want "ST003:"
+		bt.Log("must not inherit the preceding nolint")
+		//lint:ignore EXAMPLE directive must not move
+		bt.Parallel() // want "ST003:"
+		bt.Log("must not inherit the lint directive")
+	})
+}

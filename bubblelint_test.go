@@ -41,3 +41,21 @@ func TestIndependentFlags(t *testing.T) {
 		t.Fatal("analyzers share mutable settings")
 	}
 }
+
+func TestSuggestedFixes(t *testing.T) {
+	results := analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), New(&Options{CheckMisuse: true, Suggest: true}), "fixes")
+	fixed := 0
+	for _, result := range results {
+		for _, diagnostic := range result.Diagnostics {
+			if len(diagnostic.SuggestedFixes) != 0 {
+				fixed++
+				if diagnostic.Category != "ST003" || len(diagnostic.SuggestedFixes) != 1 {
+					t.Fatalf("unexpected fixes: %+v", diagnostic)
+				}
+			}
+		}
+	}
+	if fixed != 7 {
+		t.Fatalf("got %d fixable diagnostics, want 7", fixed)
+	}
+}
