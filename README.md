@@ -5,17 +5,13 @@ and can suggest concurrent tests to consider migrating to synctest.
 
 ## Project status
 
-This is an initial implementation. Rule tests, race checks, and custom
-golangci-lint integration checks have passed. A subsequent source review found
-two issues that need to be addressed before upstream integration:
+This is an initial implementation. Regression tests cover mutable bindings,
+branching helper graphs, cleanup execution contexts, and method expressions,
+alongside the rule fixtures and custom golangci-lint integration checks.
 
-- A reassigned function parameter can be resolved to its later value, causing
-  a false misuse report for an earlier call.
-- Memoization retains ancestor test bindings and can repeat analysis across
-  branching helper graphs, causing excessive CPU and memory use.
-
-The declared minimum Go version and false positives on real projects still
-need validation. The project currently has no license or CI workflow.
+The standalone analyzer's regression tests, race checks, and build have been
+validated with Go 1.25.7. False positives on real projects still need evaluation.
+The project currently has no license or CI workflow.
 
 The analyzer uses the concepts in [Testing concurrent code with
 testing/synctest](https://go.dev/blog/synctest). That article describes the Go 1.24
@@ -176,9 +172,14 @@ Analysis starts at `TestXxx(*testing.T)` entry points in nongenerated
 `_test.go` files. It follows statically resolved same-package free functions,
 directly invoked closures, immutable local function aliases, named synctest
 callbacks, `T.Run`, `T.Cleanup`, `time.AfterFunc`, and `WaitGroup.Go` callbacks.
+Standard-library method expressions such as `(*testing.T).Run` are also
+recognized, including calls through immutable aliases.
 Bubble membership follows execution rather than the source position of a
 helper definition. The analyzer tracks the specific `*testing.T` passed into
-the bubble, so reading the outer test's deadline is allowed.
+the bubble, so reading the outer test's deadline is allowed. Cleanup callbacks
+follow their owning test's execution context, including ordinary subtests
+started inside a bubble. Call caching retains lexical captures and parameter
+bindings rather than unrelated callers' test objects.
 
 Cross-package helper bodies, user-defined methods, interface dispatch,
 reassigned function values, forwarded callback parameters, arbitrary callback

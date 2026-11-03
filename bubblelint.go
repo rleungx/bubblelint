@@ -47,11 +47,18 @@ type function struct {
 	params *ast.FieldList
 }
 
+// testContext separates the T's cleanup execution context from the restrictions
+// on the special T supplied by synctest.Test. A missing binding is unknown.
+type testContext struct {
+	bubble   bool
+	synctest bool
+}
+
 type state struct {
 	bubble     bool
 	background bool
 	async      bool
-	bubbledT   map[types.Object]bool
+	tests      map[types.Object]testContext
 }
 
 type visitKey struct {
@@ -89,6 +96,20 @@ func newChecker(pass *analysis.Pass, options Options) *checker {
 func (c *checker) run() {
 	// A function value or T alias is followed only if it has one assignment.
 	writes := make(map[types.Object]int)
+	entryBindings := make(map[types.Object]bool)
+	recordEntry := func(fields *ast.FieldList) {
+		if fields == nil {
+			return
+		}
+		for _, field := range fields.List {
+			for _, name := range field.Names {
+				if obj := c.pass.TypesInfo.Defs[name]; obj != nil {
+					writes[obj]++
+					entryBindings[obj] = true
+				}
+			}
+		}
+	}
 	for _, file := range c.pass.Files {
 		if ast.IsGenerated(file) {
 			continue
@@ -96,6 +117,7 @@ func (c *checker) run() {
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.FuncDecl:
+				recordEntry(n.Recv)
 				if n.Body != nil && n.Recv == nil {
 					obj, _ := c.pass.TypesInfo.Defs[n.Name].(*types.Func)
 					fn := function{n.Body, n.Type.Params}
@@ -104,14 +126,24 @@ func (c *checker) run() {
 						c.roots = append(c.roots, fn)
 					}
 				}
+			case *ast.FuncType:
+				// Parameters and named results already have a value on entry.
+				recordEntry(n.Params)
+				recordEntry(n.Results)
 			case *ast.AssignStmt:
 				for i, lhs := range n.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok {
+					if id, ok := ast.Unparen(lhs).(*ast.Ident); ok {
 						obj := c.pass.TypesInfo.ObjectOf(id)
 						writes[obj]++
 						if len(n.Lhs) == len(n.Rhs) {
 							c.aliases[obj] = n.Rhs[i]
 						}
+					}
+				}
+			case *ast.RangeStmt:
+				for _, lhs := range []ast.Expr{n.Key, n.Value} {
+					if id, ok := ast.Unparen(lhs).(*ast.Ident); ok {
+						writes[c.pass.TypesInfo.ObjectOf(id)]++
 					}
 				}
 			case *ast.ValueSpec:
@@ -123,11 +155,11 @@ func (c *checker) run() {
 					}
 				}
 			case *ast.IncDecStmt:
-				if id, ok := n.X.(*ast.Ident); ok {
+				if id, ok := ast.Unparen(n.X).(*ast.Ident); ok {
 					writes[c.pass.TypesInfo.ObjectOf(id)]++
 				}
 			case *ast.UnaryExpr:
-				if id, ok := n.X.(*ast.Ident); ok && n.Op == token.AND {
+				if id, ok := ast.Unparen(n.X).(*ast.Ident); ok && n.Op == token.AND {
 					writes[c.pass.TypesInfo.ObjectOf(id)] += 2
 				}
 			}
@@ -141,6 +173,9 @@ func (c *checker) run() {
 	}
 	for obj, count := range writes {
 		c.assigned[obj] = count > 0
+		if entryBindings[obj] {
+			c.assigned[obj] = count > 1
+		}
 	}
 	for _, file := range c.pass.Files {
 		if ast.IsGenerated(file) {
@@ -154,7 +189,7 @@ func (c *checker) run() {
 		})
 	}
 	for _, root := range c.roots {
-		c.invoke(root, state{bubbledT: make(map[types.Object]bool)}, nil, false)
+		c.invoke(root, state{}, nil, &testContext{})
 	}
 }
 
@@ -241,46 +276,90 @@ func (c *checker) callable(expr ast.Expr) (function, bool) {
 	return function{}, false
 }
 
-func (c *checker) bubbled(expr ast.Expr, s state) bool {
-	if id, ok := ast.Unparen(expr).(*ast.Ident); ok && s.bubbledT[c.pass.TypesInfo.ObjectOf(id)] {
-		return true
+// methodCall gives method values and method expressions the same receiver and
+// argument layout, including calls through immutable aliases.
+func (c *checker) methodCall(call *ast.CallExpr) (*types.Func, ast.Expr, []ast.Expr) {
+	selector, ok := c.resolve(call.Fun).(*ast.SelectorExpr)
+	if !ok {
+		return nil, nil, nil
 	}
-	if id, ok := c.resolve(expr).(*ast.Ident); ok {
-		return s.bubbledT[c.pass.TypesInfo.ObjectOf(id)]
+	selection := c.pass.TypesInfo.Selections[selector]
+	if selection == nil {
+		return nil, nil, nil
 	}
-	return false
+	receiver, args := selector.X, call.Args
+	if selection.Kind() == types.MethodExpr {
+		if len(args) == 0 {
+			return nil, nil, nil
+		}
+		receiver, args = args[0], args[1:]
+	}
+	fn, _ := selection.Obj().(*types.Func)
+	return fn, receiver, args
 }
 
-func (c *checker) invoke(fn function, s state, args []ast.Expr, bubbleCallback bool) bool {
-	bindings := make(map[types.Object]bool, len(s.bubbledT))
-	for obj, value := range s.bubbledT {
-		bindings[obj] = value
+func (c *checker) testContext(expr ast.Expr, s state) (testContext, bool) {
+	if id, ok := ast.Unparen(expr).(*ast.Ident); ok {
+		if context, known := s.tests[c.pass.TypesInfo.ObjectOf(id)]; known {
+			return context, true
+		}
+	}
+	if id, ok := c.resolve(expr).(*ast.Ident); ok {
+		context, known := s.tests[c.pass.TypesInfo.ObjectOf(id)]
+		return context, known
+	}
+	return testContext{}, false
+}
+
+func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testContext) bool {
+	bindings := make(map[types.Object]testContext)
+	for obj, context := range s.tests {
+		// Only lexical captures are available to the callee. Retaining the
+		// dynamic call stack here creates a different cache key for every path
+		// through a shared helper graph.
+		if scope := obj.Parent(); scope != nil && scope.Contains(fn.body.Pos()) {
+			bindings[obj] = context
+		}
 	}
 	index := 0
 	if fn.params != nil {
 		for _, field := range fn.params.List {
 			for _, name := range field.Names {
-				value := bubbleCallback && index == 0
-				if !bubbleCallback && index < len(args) {
-					value = c.bubbled(args[index], s)
+				var context testContext
+				known := false
+				if callbackT != nil && index == 0 {
+					context, known = *callbackT, true
+				} else if index < len(args) {
+					context, known = c.testContext(args[index], s)
 				}
 				obj := c.pass.TypesInfo.Defs[name]
-				bindings[obj] = value && !c.assigned[obj]
+				delete(bindings, obj)
+				if known && obj != nil && !c.assigned[obj] {
+					bindings[obj] = context
+				}
 				index++
 			}
 		}
 	}
-	s.bubbledT = bindings
-	var positions []int
-	for obj, value := range bindings {
-		if value && obj != nil {
-			positions = append(positions, int(obj.Pos()))
-		}
+	s.tests = bindings
+	type binding struct {
+		pos     token.Pos
+		context testContext
 	}
-	sort.Ints(positions)
+	var ordered []binding
+	for obj, context := range bindings {
+		ordered = append(ordered, binding{obj.Pos(), context})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].pos < ordered[j].pos })
 	var keyText strings.Builder
-	for _, pos := range positions {
-		keyText.WriteString(strconv.Itoa(pos))
+	for _, binding := range ordered {
+		keyText.WriteString(strconv.Itoa(int(binding.pos)))
+		if binding.context.bubble {
+			keyText.WriteByte('b')
+		}
+		if binding.context.synctest {
+			keyText.WriteByte('s')
+		}
 		keyText.WriteByte(',')
 	}
 	key := visitKey{fn.body, s.bubble, s.background, s.async, keyText.String()}
@@ -335,7 +414,11 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			if callback, ok := c.callable(call.Args[index]); ok {
 				inner := *s
 				inner.bubble, inner.background, inner.async = true, false, false
-				c.invoke(callback, inner, nil, index == 1)
+				var callbackT *testContext
+				if index == 1 {
+					callbackT = &testContext{bubble: true, synctest: true}
+				}
+				c.invoke(callback, inner, nil, callbackT)
 			}
 		}
 		return
@@ -359,23 +442,22 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			if fn, ok := c.callable(call.Args[1]); ok {
 				worker := *s
 				worker.background = true
-				c.invoke(fn, worker, nil, false)
+				c.invoke(fn, worker, nil, nil)
 			}
 		}
 	}
-	if selector, ok := c.resolve(call.Fun).(*ast.SelectorExpr); ok {
-		fn := c.object(call.Fun)
-		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "sync" && fn.Name() == "Go" && len(call.Args) == 1 {
+	if fn, receiver, args := c.methodCall(call); fn != nil && fn.Pkg() != nil {
+		if fn.Pkg().Path() == "sync" && fn.Name() == "Go" && len(args) == 1 {
 			s.async = true
-			if callback, ok := c.callable(call.Args[0]); ok {
+			if callback, ok := c.callable(args[0]); ok {
 				worker := *s
 				worker.background = true
-				c.invoke(callback, worker, nil, false)
+				c.invoke(callback, worker, nil, nil)
 			}
 		}
-		if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(selector.X)) {
-			bubbled := c.bubbled(selector.X, *s)
-			if bubbled && c.options.CheckMisuse {
+		if fn.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(receiver)) {
+			context, known := c.testContext(receiver, *s)
+			if known && context.synctest && c.options.CheckMisuse {
 				switch fn.Name() {
 				case "Run", "Parallel", "Deadline":
 					c.report(call, "ST003", "testing.T."+fn.Name()+" must not be called on the *testing.T provided by synctest.Test")
@@ -387,24 +469,29 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			} else if fn.Name() == "Cleanup" {
 				index = 0
 			}
-			if index >= 0 && index < len(call.Args) {
-				if callback, ok := c.callable(call.Args[index]); ok {
+			if index >= 0 && index < len(args) {
+				if callback, ok := c.callable(args[index]); ok {
 					inner := *s
 					inner.async = false
+					var callbackT *testContext
 					if fn.Name() == "Cleanup" {
+						if !known {
+							return
+						}
 						// Cleanup runs with its owning T, possibly after the
 						// registering goroutine's bubble has exited.
-						inner.bubble = bubbled
+						inner.bubble = context.bubble
+					} else {
+						// Run creates an ordinary T in the caller's bubble.
+						callbackT = &testContext{bubble: s.bubble}
 					}
-					// Run starts a goroutine in the caller's bubble. Its T
-					// is a normal subtest T, not synctest.Test's special T.
-					c.invoke(callback, inner, nil, false)
+					c.invoke(callback, inner, nil, callbackT)
 				}
 			}
 		}
 	}
 	if fn, ok := c.callable(call.Fun); ok {
-		s.async = c.invoke(fn, *s, call.Args, false) || s.async
+		s.async = c.invoke(fn, *s, call.Args, nil) || s.async
 	}
 }
 
