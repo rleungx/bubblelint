@@ -59,17 +59,6 @@ func TestEarlyFatal(t *testing.T) {
 	<-done
 }
 
-func TestSelect(t *testing.T) {
-	done := make(chan struct{})
-	go func() { close(done) }()
-	time.Sleep(time.Second) // want "ST100:"
-	select {
-	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
-		t.Fatal("timed out")
-	}
-}
-
 func TestLoop(t *testing.T) {
 	done := make(chan struct{})
 	go func() { close(done) }()

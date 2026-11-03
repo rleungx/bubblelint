@@ -489,7 +489,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}
 		if c.timeouts[call] {
-			c.report(call, "ST101", "consider synctest.Test for this timeout-based channel assertion; verify that the channel and its producers can run in the same bubble")
+			c.report(call, "ST101", "consider synctest.Test for this timeout-based channel assertion; verify that the channel and its producers can run in the same bubble", c.migrationFixes[call]...)
 		}
 	}
 	if c.named(call.Fun, "context", "AfterFunc") || c.named(call.Fun, "time", "AfterFunc") {

@@ -79,14 +79,19 @@ bubblelint -suggest ./...
 go test ./...
 ```
 
-Migration fixes cover ST100 tests whose goroutines finish by closing or sending
-to local channels, and whose main test receives every result before checking
-assertions. The fix adds the import and wraps the test body, preserving its
-`Sleep` calls and assertions. Sleeps then use virtual time.
+Migration fixes cover simple tests whose goroutines finish by closing or sending
+to local channels:
+
+- **ST100:** the test receives every result before checking assertions.
+- **ST101:** a two-case `select` waits for the final worker or a constant
+  `time.After` timeout. The worker must be guaranteed to signal before the timeout.
+
+The fix adds the import and wraps the test body. Existing `Sleep` calls,
+`select` branches, timeout values, and assertions stay intact; time advances
+virtually inside the test.
 
 Tests with helpers, external I/O, shared state, or more complex control flow
-remain suggestions. ST101 timeout checks still need manual migration. Review
-the diff and run your tests after applying fixes.
+remain suggestions. Review the diff and run your tests after applying fixes.
 
 ## golangci-lint
 

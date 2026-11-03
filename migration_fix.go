@@ -3,6 +3,7 @@ package bubblelint
 import (
 	"bytes"
 	"go/ast"
+	"go/constant"
 	"go/format"
 	"go/token"
 	"go/types"
@@ -16,22 +17,26 @@ import (
 // Migration deliberately recognizes a small protocol instead of inferring
 // arbitrary helper effects or goroutine lifetimes: each finite worker signals
 // its own local channel as its last action, and the test joins every worker
-// before any assertions or control flow. This prevents introducing a bubble
-// that deadlocks when the root returns while a worker is still sleeping.
+// before any assertions or control flow. A timeout select may join the final
+// worker only when its signal is guaranteed to precede the timeout in virtual
+// time. This prevents a root from exiting while a worker is still sleeping.
 type migration struct {
-	c        *checker
-	test     types.Object
-	values   map[types.Object]bool
-	channels map[types.Object]*migrationChannel
-	workers  int
-	started  int
-	joined   int
-	sleeps   []*ast.CallExpr
+	c          *checker
+	test       types.Object
+	values     map[types.Object]bool
+	channels   map[types.Object]*migrationChannel
+	workers    int
+	started    int
+	joined     int
+	sleeps     []*ast.CallExpr
+	timeouts   []*ast.CallExpr
+	timerTotal constant.Value
 }
 
 type migrationChannel struct {
 	started bool
 	joined  bool
+	delay   constant.Value
 }
 
 func (c *checker) findMigrationFixes() {
@@ -76,13 +81,25 @@ func (c *checker) findMigrationFixes() {
 			if name.Name == "_" || name.Name == strings.TrimSuffix(qualifier, ".Test") || shadowedType || c.assigned[obj] || hasGoDirective(fn.Doc) {
 				continue
 			}
-			m := &migration{c: c, test: obj, values: make(map[types.Object]bool), channels: make(map[types.Object]*migrationChannel)}
+			m := &migration{
+				c: c, test: obj,
+				values:     make(map[types.Object]bool),
+				channels:   make(map[types.Object]*migrationChannel),
+				timerTotal: constant.MakeInt64(0),
+			}
 			for _, stmt := range fn.Body.List {
 				if _, ok := stmt.(*ast.GoStmt); ok {
 					m.workers++
 				}
 			}
-			if m.workers == 0 || !m.statements(fn.Body.List) || m.started != m.workers || m.joined != m.workers || len(m.sleeps) == 0 {
+			if m.workers == 0 || !m.statements(fn.Body.List) || m.started != m.workers || m.joined != m.workers || len(m.sleeps)+len(m.timeouts) == 0 {
+				continue
+			}
+			// Keep ample headroom above synctest's January 2000 epoch. Timer
+			// deadline saturation could otherwise turn a strict delay bound
+			// into a tie. Sum every positive duration, including branch bodies,
+			// using arbitrary precision so the check itself cannot overflow.
+			if len(m.timeouts) > 0 && constant.Compare(m.timerTotal, token.GTR, constant.MakeInt64(1<<62-1)) {
 				continue
 			}
 			var typ bytes.Buffer
@@ -95,11 +112,14 @@ func (c *checker) findMigrationFixes() {
 				analysis.TextEdit{Pos: fn.Body.Rbrace, End: fn.Body.Rbrace, NewText: []byte("})\n")},
 			)
 			fix := []analysis.SuggestedFix{{Message: "Run this test in a synctest bubble", TextEdits: edits}}
-			// Identical edits are coalesced by the standard drivers. Every sleep
-			// covered by the migration gets a fix, so no stale ST100 is left in
+			// Identical edits are coalesced by the standard drivers. Every site
+			// covered by the migration gets a fix, so no stale finding is left in
 			// golangci-lint's output after a successful --fix.
 			for _, sleep := range m.sleeps {
 				c.migrationFixes[sleep] = fix
+			}
+			for _, timeout := range m.timeouts {
+				c.migrationFixes[timeout] = fix
 			}
 		}
 	}
@@ -146,6 +166,10 @@ func (m *migration) statements(statements []ast.Stmt) bool {
 				return false
 			}
 			if s.Else != nil && !m.statements([]ast.Stmt{s.Else}) {
+				return false
+			}
+		case *ast.SelectStmt:
+			if !m.timeoutSelect(s) {
 				return false
 			}
 		case *ast.BlockStmt:
@@ -226,6 +250,7 @@ func (m *migration) worker(call *ast.CallExpr) bool {
 	if !ok || len(call.Args) != 0 || len(fn.Type.Params.List) != 0 || len(fn.Body.List) == 0 {
 		return false
 	}
+	delay := constant.MakeInt64(0)
 	for _, stmt := range fn.Body.List[:len(fn.Body.List)-1] {
 		expr, ok := stmt.(*ast.ExprStmt)
 		if !ok {
@@ -234,6 +259,10 @@ func (m *migration) worker(call *ast.CallExpr) bool {
 		call, ok := ast.Unparen(expr.X).(*ast.CallExpr)
 		if !ok || !m.sleep(call) {
 			return false
+		}
+		value := m.c.pass.TypesInfo.Types[call.Args[0]].Value
+		if constant.Sign(value) > 0 {
+			delay = constant.BinaryOp(delay, token.ADD, value)
 		}
 	}
 	var channel ast.Expr
@@ -257,6 +286,7 @@ func (m *migration) worker(call *ast.CallExpr) bool {
 		return false
 	}
 	ch.started = true
+	ch.delay = delay
 	m.started++
 	return true
 }
@@ -284,7 +314,72 @@ func (m *migration) channel(expr ast.Expr) *migrationChannel {
 
 func (m *migration) sleep(call *ast.CallExpr) bool {
 	fn, ok := directObject(m.c.pass.TypesInfo, call.Fun).(*types.Func)
-	return ok && fn.Pkg() != nil && fn.Pkg().Path() == "time" && fn.Name() == "Sleep" && len(call.Args) == 1 && m.c.pass.TypesInfo.Types[call.Args[0]].Value != nil
+	if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "time" || fn.Name() != "Sleep" || len(call.Args) != 1 {
+		return false
+	}
+	value := m.c.pass.TypesInfo.Types[call.Args[0]].Value
+	if value == nil {
+		return false
+	}
+	m.addDuration(value)
+	return true
+}
+
+func (m *migration) addDuration(value constant.Value) {
+	if constant.Sign(value) > 0 {
+		m.timerTotal = constant.BinaryOp(m.timerTotal, token.ADD, value)
+	}
+}
+
+func (m *migration) timeoutSelect(stmt *ast.SelectStmt) bool {
+	if len(stmt.Body.List) != 2 || m.started != m.workers || m.joined+1 != m.workers {
+		return false
+	}
+	var result, timeout *ast.CommClause
+	var after *ast.CallExpr
+	var ch *migrationChannel
+	for _, item := range stmt.Body.List {
+		clause := item.(*ast.CommClause)
+		expr := receive(clause.Comm)
+		if candidate := m.channel(expr); candidate != nil {
+			if result != nil || !candidate.started || candidate.joined {
+				return false
+			}
+			result, ch = clause, candidate
+			continue
+		}
+		call, ok := expr.(*ast.CallExpr)
+		if !ok || timeout != nil || len(call.Args) != 1 {
+			return false
+		}
+		fn, ok := directObject(m.c.pass.TypesInfo, call.Fun).(*types.Func)
+		if !ok || fn.Pkg() == nil || fn.Pkg().Path() != "time" || fn.Name() != "After" {
+			return false
+		}
+		// Binding the timer's time.Time value could expose the fake epoch.
+		if _, ok := clause.Comm.(*ast.ExprStmt); !ok {
+			return false
+		}
+		timeout, after = clause, call
+	}
+	if result == nil || timeout == nil {
+		return false
+	}
+	duration := m.c.pass.TypesInfo.Types[after.Args[0]].Value
+	if duration == nil || constant.Sign(duration) <= 0 || !constant.Compare(ch.delay, token.LSS, duration) {
+		return false
+	}
+	// All worker operations before the final signal are constant Sleeps.
+	// Fake time cannot advance while that worker is runnable, so its signal
+	// becomes ready strictly before the timer. The timeout branch cannot run
+	// in the bubble; the receive branch joins the final outstanding worker.
+	// Still validate both bodies to preserve the whole-test safety boundary.
+	if !m.statements([]ast.Stmt{result.Comm}) || !m.statements(result.Body) || !m.statements(timeout.Body) {
+		return false
+	}
+	m.addDuration(duration)
+	m.timeouts = append(m.timeouts, after)
+	return true
 }
 
 func (m *migration) builtin(expr ast.Expr, name string) bool {
