@@ -69,8 +69,24 @@ bubblelint ./...
 ```
 
 This removes unsupported `t.Parallel()` statements directly inside inline
-`synctest.Test` callbacks. Calls through helpers or aliases, and all other
-findings, still need manual review.
+`synctest.Test` callbacks.
+
+To also migrate simple concurrent tests to `synctest.Test`:
+
+```sh
+bubblelint -suggest -fix ./...
+bubblelint -suggest ./...
+go test ./...
+```
+
+Migration fixes cover ST100 tests whose goroutines finish by closing or sending
+to local channels, and whose main test receives every result before checking
+assertions. The fix adds the import and wraps the test body, preserving its
+`Sleep` calls and assertions. Sleeps then use virtual time.
+
+Tests with helpers, external I/O, shared state, or more complex control flow
+remain suggestions. ST101 timeout checks still need manual migration. Review
+the diff and run your tests after applying fixes.
 
 ## golangci-lint
 
@@ -118,6 +134,8 @@ Add `--fix` to apply the same automatic fixes:
 ```sh
 /path/to/bubblelint/bin/golangci-lint-bubble run --fix ./...
 ```
+
+Set `suggest: true` in the settings above to include migration fixes.
 
 </details>
 

@@ -1,0 +1,16 @@
+package alias
+
+import (
+	"testing"
+	st "testing/synctest"
+	"time"
+)
+
+func TestMigration(t *testing.T) {
+	done := make(chan struct{})
+	go func() { close(done) }()
+	time.Sleep(time.Second) // want "ST100:"
+	<-done
+}
+
+func existing(t *testing.T) { st.Test(t, func(t *testing.T) {}) }

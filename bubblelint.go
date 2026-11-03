@@ -80,7 +80,8 @@ type checker struct {
 	reported  map[token.Pos]map[string]bool
 	roots     []function
 
-	parallelFixes map[*ast.CallExpr][]analysis.SuggestedFix
+	parallelFixes  map[*ast.CallExpr][]analysis.SuggestedFix
+	migrationFixes map[*ast.CallExpr][]analysis.SuggestedFix
 }
 
 func newChecker(pass *analysis.Pass, options Options) *checker {
@@ -194,6 +195,7 @@ func (c *checker) run() {
 		c.findParallelFixes()
 	}
 	if c.options.Suggest {
+		c.findMigrationFixes()
 		for _, file := range c.pass.Files {
 			if ast.IsGenerated(file) {
 				continue
@@ -484,7 +486,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 	c.checkBubbleOnly(call.Fun, call, *s)
 	if c.options.Suggest && !s.bubble && !s.background && c.supportsSynctest() {
 		if s.async && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
-			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility")
+			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}
 		if c.timeouts[call] {
 			c.report(call, "ST101", "consider synctest.Test for this timeout-based channel assertion; verify that the channel and its producers can run in the same bubble")

@@ -1,0 +1,16 @@
+package blank
+
+import (
+	"testing"
+	synctest "testing/synctest"
+	"time"
+)
+
+func TestMigration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan struct{})
+		go func() { close(done) }()
+		time.Sleep(time.Second) // want "ST100:"
+		<-done
+	})
+}
