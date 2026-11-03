@@ -1,0 +1,20 @@
+version: "2"
+run:
+  tests: true
+linters:
+  default: none
+  enable:
+    - bubblelint
+  settings:
+    custom:
+      bubblelint:
+        type: module
+        description: Check synctest usage and find concurrent tests to migrate.
+        settings:
+          check-misuse: true
+          suggest: true
+  exclusions:
+    presets: []
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

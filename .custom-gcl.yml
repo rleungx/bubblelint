@@ -1,0 +1,7 @@
+version: v2.13.0
+name: golangci-lint-bubble
+destination: ./bin
+plugins:
+  - module: github.com/rleungx/bubblelint
+    import: github.com/rleungx/bubblelint/plugin
+    path: .
