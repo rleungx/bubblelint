@@ -80,29 +80,13 @@ func TestTimeout(t *testing.T) {
 }
 `
 
-func (d autofixDriver) runMigration(t *testing.T, dir string, fix, suggest bool, exclusions string) (string, string, int) {
+func (d autofixDriver) runMigration(t *testing.T, dir string, fix, migration bool, exclusions string) (string, string, int) {
 	t.Helper()
-	// Exercise the drivers' defaults for enabled suggestions. Disabling them
-	// requires an explicit false setting so omitted settings stay covered.
-	var args []string
-	if d.golangci {
-		settings := ""
-		if !suggest {
-			settings = "suggest: false"
-		}
-		args = []string{"run", "--config", writeConfig(t, settings, exclusions), "--show-stats=false"}
-		if fix {
-			args = append(args, "--fix")
-		}
-	} else {
-		if !suggest {
-			args = append(args, "-suggest=false")
-		}
-		if fix {
-			args = append(args, "-fix")
-		}
+	var checks []string
+	if !migration {
+		checks = []string{"all", "-ST100", "-ST101"}
 	}
-	return runCommand(t, dir, d.binary, append(args, "./...")...)
+	return d.runChecks(t, dir, fix, checks, exclusions)
 }
 
 func TestMigrationFix(t *testing.T) {
@@ -161,7 +145,7 @@ func TestMigrationFix(t *testing.T) {
 				})
 			}
 
-			t.Run("disabled-suggestions", func(t *testing.T) {
+			t.Run("excluded-migration-rules", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, migrationFixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.runMigration(t, dir, true, false, "")

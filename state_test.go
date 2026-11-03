@@ -41,7 +41,7 @@ func BenchmarkCheckerHelperGraph(b *testing.B) {
 			b.ResetTimer()
 			b.StartTimer()
 			for i := 0; i < b.N; i++ {
-				newChecker(&pass, Options{CheckMisuse: true}).run()
+				newChecker(&pass, misuseChecks).run()
 			}
 			b.StopTimer()
 			b.ReportMetric(float64(len(loaded[0].visited)), "contexts/op")
@@ -130,7 +130,7 @@ func runStateFixture(t testing.TB, source string) []*checker {
 	a := New(nil)
 	a.ResultType = reflect.TypeOf((*checker)(nil))
 	a.Run = func(pass *analysis.Pass) (any, error) {
-		c := newChecker(pass, Options{CheckMisuse: true})
+		c := newChecker(pass, misuseChecks)
 		c.run()
 		return c, nil
 	}

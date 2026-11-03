@@ -11,8 +11,7 @@ linters:
         type: module
         description: Check synctest usage and find concurrent tests to migrate.
         settings:
-          check-misuse: true
-          suggest: true
+          checks: [all]
   exclusions:
     presets: []
 issues:

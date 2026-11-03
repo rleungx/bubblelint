@@ -233,7 +233,7 @@ func TestTimeoutMigrationFix(t *testing.T) {
 				})
 			}
 
-			t.Run("disabled-suggestions", func(t *testing.T) {
+			t.Run("excluded-migration-rules", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, timeoutFixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.runMigration(t, dir, true, false, "")

@@ -15,27 +15,21 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// Options controls independent groups of checks.
-type Options struct {
-	CheckMisuse bool
-	Suggest     bool
-}
-
-// New returns an independent analyzer. Nil enables all checks.
+// New returns an independent analyzer. Nil enables all checks. Invalid Options
+// are reported when the analyzer runs; use Options.Validate to check them early.
 func New(options *Options) *analysis.Analyzer {
-	settings := Options{CheckMisuse: true, Suggest: true}
-	if options != nil {
-		settings = *options
-	}
+	selection := newCheckSelection(options)
 	a := &analysis.Analyzer{
 		Name: "bubblelint",
 		Doc:  "check testing/synctest usage and find timeout-based concurrent tests",
 	}
-	a.Flags.BoolVar(&settings.CheckMisuse, "check-misuse", settings.CheckMisuse, "check definite synctest misuse on known test call paths")
-	a.Flags.BoolVar(&settings.Suggest, "suggest", settings.Suggest, "report synctest migration suggestions (ST100, ST101)")
+	a.Flags.Var(selection, "checks", "comma-separated checks: all, ST001, ST002, ST003, ST100, ST101; prefix a name with '-' to disable it")
 	a.Run = func(pass *analysis.Pass) (any, error) {
-		if settings.CheckMisuse || settings.Suggest {
-			newChecker(pass, settings).run()
+		if selection.err != nil {
+			return nil, selection.err
+		}
+		if selection.enabled != 0 {
+			newChecker(pass, selection.enabled).run()
 		}
 		return nil, nil
 	}
@@ -71,7 +65,7 @@ type visitKey struct {
 
 type checker struct {
 	pass      *analysis.Pass
-	options   Options
+	checks    checkSet
 	functions map[*types.Func]function
 	aliases   map[types.Object]ast.Expr
 	assigned  map[types.Object]bool
@@ -84,9 +78,9 @@ type checker struct {
 	migrationFixes map[*ast.CallExpr][]analysis.SuggestedFix
 }
 
-func newChecker(pass *analysis.Pass, options Options) *checker {
+func newChecker(pass *analysis.Pass, checks checkSet) *checker {
 	return &checker{
-		pass: pass, options: options,
+		pass: pass, checks: checks,
 		functions: make(map[*types.Func]function),
 		aliases:   make(map[types.Object]ast.Expr),
 		assigned:  make(map[types.Object]bool),
@@ -191,11 +185,13 @@ func (c *checker) run() {
 			c.assigned[obj] = count > 1
 		}
 	}
-	if c.options.CheckMisuse {
+	if c.checks&checkST003 != 0 {
 		c.findParallelFixes()
 	}
-	if c.options.Suggest {
+	if c.checks&migrationChecks != 0 {
 		c.findMigrationFixes()
+	}
+	if c.checks&checkST101 != 0 {
 		for _, file := range c.pass.Files {
 			if ast.IsGenerated(file) {
 				continue
@@ -304,7 +300,7 @@ func (c *checker) callback(expr ast.Expr, s state, callbackT *testContext) {
 		c.invoke(fn, s, nil, callbackT)
 		return
 	}
-	if !c.options.CheckMisuse {
+	if c.checks&misuseChecks == 0 {
 		return
 	}
 	c.checkBubbleOnly(expr, expr, s)
@@ -329,7 +325,7 @@ func (c *checker) callback(expr ast.Expr, s state, callbackT *testContext) {
 }
 
 func (c *checker) checkBubbleOnly(expr ast.Expr, site ast.Node, s state) {
-	if !c.options.CheckMisuse || s.bubble {
+	if c.checks&checkST001 == 0 || s.bubble {
 		return
 	}
 	fn := c.object(expr)
@@ -465,7 +461,7 @@ func (c *checker) walk(node ast.Node, s *state) {
 
 func (c *checker) call(call *ast.CallExpr, s *state) {
 	if c.named(call.Fun, "testing/synctest", "Test") || c.named(call.Fun, "testing/synctest", "Run") {
-		if s.bubble && c.options.CheckMisuse {
+		if s.bubble && c.checks&checkST002 != 0 {
 			c.report(call, "ST002", "cannot start a synctest bubble from inside another bubble")
 		}
 		index := 1
@@ -484,8 +480,8 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		return
 	}
 	c.checkBubbleOnly(call.Fun, call, *s)
-	if c.options.Suggest && !s.bubble && !s.background && c.supportsSynctest() {
-		if s.async && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
+	if c.checks&migrationChecks != 0 && !s.bubble && !s.background && c.supportsSynctest() {
+		if c.checks&checkST100 != 0 && s.async && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}
 		if c.timeouts[call] {
@@ -511,7 +507,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		}
 		if fn.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(receiver)) {
 			context, known := c.testContext(receiver, *s)
-			if known && context.synctest && c.options.CheckMisuse {
+			if known && context.synctest && c.checks&checkST003 != 0 {
 				switch fn.Name() {
 				case "Run", "Parallel", "Deadline":
 					c.report(call, "ST003", "testing.T."+fn.Name()+" must not be called on the *testing.T provided by synctest.Test", c.parallelFixes[call]...)
@@ -600,6 +596,9 @@ func (c *checker) findTimeouts(stmt *ast.SelectStmt) {
 }
 
 func (c *checker) report(node ast.Node, code, message string, fixes ...analysis.SuggestedFix) {
+	if c.checks&checkID(code) == 0 {
+		return
+	}
 	if c.reported[node.Pos()] == nil {
 		c.reported[node.Pos()] = make(map[string]bool)
 	}

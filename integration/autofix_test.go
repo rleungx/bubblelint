@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"encoding/json"
 	"go/format"
 	"os"
 	"path/filepath"
@@ -35,11 +36,26 @@ type autofixDriver struct {
 
 func (d autofixDriver) run(t *testing.T, dir string, fix, disabled bool, exclusions string) (string, string, int) {
 	t.Helper()
+	checks := []string{"ST003"}
+	if disabled {
+		checks = []string{"all", "-ST003"}
+	}
+	return d.runChecks(t, dir, fix, checks, exclusions)
+}
+
+// A nil selection exercises the default. An explicit empty selection disables
+// every rule, matching the CLI's empty checks argument and the plugin's [].
+func (d autofixDriver) runChecks(t *testing.T, dir string, fix bool, checks []string, exclusions string) (string, string, int) {
+	t.Helper()
 	var args []string
 	if d.golangci {
 		settings := ""
-		if disabled {
-			settings = "check-misuse: false"
+		if checks != nil {
+			encoded, err := json.Marshal(checks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings = "checks: " + string(encoded)
 		}
 		args = []string{"run", "--config", writeConfig(t, settings, exclusions), "--show-stats=false"}
 		if fix {
@@ -49,8 +65,8 @@ func (d autofixDriver) run(t *testing.T, dir string, fix, disabled bool, exclusi
 		if fix {
 			args = append(args, "-fix")
 		}
-		if disabled {
-			args = append(args, "-check-misuse=false")
+		if checks != nil {
+			args = append(args, "-checks="+strings.Join(checks, ","))
 		}
 	}
 	return runCommand(t, dir, d.binary, append(args, "./...")...)
@@ -126,7 +142,7 @@ func TestAutofix(t *testing.T) {
 				checkAutofixUnchanged(t, path, fixed)
 			})
 
-			t.Run("disabled-misuse-checks", func(t *testing.T) {
+			t.Run("excluded-misuse-rule", func(t *testing.T) {
 				dir, path := writeAutofixModule(t, autofixSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.run(t, dir, true, true, "")

@@ -49,13 +49,20 @@ All five checks run by default:
 | ST100 | Sleeps used after starting asynchronous work. |
 | ST101 | Channel checks that use timeouts. |
 
-ST100 and ST101 suggest tests that may benefit from synctest. Review these
-suggestions, especially when a test depends on real network I/O or timing
-behavior. To check only incorrect synctest usage:
+Choose individual checks, or start with all checks and exclude some:
 
 ```sh
-bubblelint -suggest=false ./...
+bubblelint -checks=ST003 ./...
+bubblelint -checks=all,-ST101 ./...
 ```
+
+Entries apply from left to right. Use `-checks=` to disable every check.
+ST100 and ST101 suggest tests that may benefit from synctest; review these
+suggestions when a test depends on real network I/O or timing behavior.
+
+The former `suggest` and `check-misuse` options are replaced by `checks`.
+Use `-checks=ST001,ST002,ST003` instead of `-suggest=false`, or
+`-checks=ST100,ST101` instead of `-check-misuse=false`.
 
 ## Automatic fixes
 
@@ -114,9 +121,11 @@ linters:
       bubblelint:
         type: module
         settings:
-          check-misuse: true # Check incorrect synctest calls.
-          suggest: true # Set to false to skip migration suggestions.
+          checks: [all] # Optional: all checks run by default.
 ```
+
+Use the same rule names and exclusions in this list, such as
+`checks: [all, -ST101]`. An empty list (`checks: []`) disables all checks.
 
 Run the custom binary in your project's directory:
 

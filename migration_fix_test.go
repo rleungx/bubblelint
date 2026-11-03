@@ -22,7 +22,7 @@ func TestMigrationSuggestedFixes(t *testing.T) {
 		{"timeout", 1, 12},
 	} {
 		t.Run(tc.pkg, func(t *testing.T) {
-			results := analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), New(&Options{CheckMisuse: true, Suggest: true}), "migrationfix/"+tc.pkg)
+			results := analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), New(nil), "migrationfix/"+tc.pkg)
 			fixed := map[string]int{}
 			var sleepFix *analysis.SuggestedFix
 			var timeoutFixes []analysis.SuggestedFix
@@ -59,7 +59,7 @@ func TestMigrationSuggestedFixes(t *testing.T) {
 }
 
 func TestMigrationRejectsUnsupportedTests(t *testing.T) {
-	results := analysistest.Run(t, analysistest.TestData(), New(&Options{CheckMisuse: true, Suggest: true}), "migrationnofix")
+	results := analysistest.Run(t, analysistest.TestData(), New(nil), "migrationnofix")
 	diagnostics := 0
 	for _, result := range results {
 		for _, diagnostic := range result.Diagnostics {

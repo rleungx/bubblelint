@@ -47,10 +47,20 @@ func TestCLI(t *testing.T) {
 		codes []string
 	}{
 		{"defaults", nil, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"misuse-only", []string{"-suggest=false"}, []string{"ST001", "ST002", "ST003"}},
-		{"all-enabled", []string{"-check-misuse=true", "-suggest=true"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"suggest-only", []string{"-check-misuse=false"}, []string{"ST100", "ST101"}},
-		{"all-disabled", []string{"-check-misuse=false", "-suggest=false"}, nil},
+		{"misuse-only", []string{"-checks=ST001,ST002,ST003"}, []string{"ST001", "ST002", "ST003"}},
+		{"all-enabled", []string{"-checks=all"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"migration-only", []string{"-checks=ST100,ST101"}, []string{"ST100", "ST101"}},
+		{"ST001", []string{"-checks=ST001"}, []string{"ST001"}},
+		{"ST002", []string{"-checks=ST002"}, []string{"ST002"}},
+		{"ST003", []string{"-checks=ST003"}, []string{"ST003"}},
+		{"ST100", []string{"-checks=ST100"}, []string{"ST100"}},
+		{"ST101", []string{"-checks=ST101"}, []string{"ST101"}},
+		{"exclude-one", []string{"-checks=all,-ST101"}, []string{"ST001", "ST002", "ST003", "ST100"}},
+		{"reset-selection", []string{"-checks=all,-all,ST003"}, []string{"ST003"}},
+		{"reenable-rule", []string{"-checks=all,-ST003,ST003"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"exclude-from-empty", []string{"-checks=-ST003"}, nil},
+		{"empty-selection", []string{"-checks="}, nil},
+		{"all-disabled", []string{"-checks=-all"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := expectedDiagnostics(t, root, "integration_cases", tc.codes)
@@ -75,11 +85,16 @@ func TestCLI(t *testing.T) {
 	for _, tc := range []struct {
 		name, arg, message string
 	}{
-		{"unknown-setting", "-sugest=true", "sugest"},
-		{"wrong-type", "-suggest=not-a-bool", "suggest"},
+		{"unknown-rule", "-checks=ST999", "ST999"},
+		{"empty-element", "-checks=ST001,,ST003", "checks"},
+		{"wildcard", "-checks=ST1*", "ST1*"},
+		{"malformed-token", "-checks=--ST003", "--ST003"},
+		{"removed-suggest", "-suggest=true", "suggest"},
+		{"removed-check-misuse", "-check-misuse=false", "check-misuse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			stdout, stderr, exit := runCommand(t, root, *cliBinary, tc.arg, "./testdata/src/integration_cases")
+			// Invalid settings must fail before trying to load this missing package.
+			stdout, stderr, exit := runCommand(t, root, *cliBinary, tc.arg, "./testdata/src/does-not-exist")
 			if exit != 2 || !strings.Contains(stdout+stderr, tc.message) {
 				t.Fatalf("expected flag error mentioning %q, got exit %d\nstdout:\n%s\nstderr:\n%s", tc.message, exit, stdout, stderr)
 			}
@@ -97,10 +112,20 @@ func TestGolangciLint(t *testing.T) {
 		codes                           []string
 	}{
 		{"defaults", "", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"misuse-only", "suggest: false", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
-		{"all-enabled", "check-misuse: true\n          suggest: true", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
-		{"suggest-only", "check-misuse: false", "", "integration_cases", []string{"ST100", "ST101"}},
-		{"all-disabled", "check-misuse: false\n          suggest: false", "", "integration_cases", nil},
+		{"misuse-only", "checks: [ST001, ST002, ST003]", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
+		{"all-enabled", "checks: [all]", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"migration-only", "checks: [ST100, ST101]", "", "integration_cases", []string{"ST100", "ST101"}},
+		{"ST001", "checks: [ST001]", "", "integration_cases", []string{"ST001"}},
+		{"ST002", "checks: [ST002]", "", "integration_cases", []string{"ST002"}},
+		{"ST003", "checks: [ST003]", "", "integration_cases", []string{"ST003"}},
+		{"ST100", "checks: [ST100]", "", "integration_cases", []string{"ST100"}},
+		{"ST101", "checks: [ST101]", "", "integration_cases", []string{"ST101"}},
+		{"exclude-one", "checks: [all, '-ST101']", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100"}},
+		{"reset-selection", "checks: [all, '-all', ST003]", "", "integration_cases", []string{"ST003"}},
+		{"reenable-rule", "checks: [all, '-ST003', ST003]", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"exclude-from-empty", "checks: ['-ST003']", "", "integration_cases", nil},
+		{"empty-selection", "checks: []", "", "integration_cases", nil},
+		{"all-disabled", "checks: ['-all']", "", "integration_cases", nil},
 		{"misuse-regressions", "", "", "misuse", []string{"ST001", "ST002", "ST003"}},
 		{"migration-regressions", "", "", "migration", []string{"ST100", "ST101"}},
 		{"clean", "", "", "clean", nil},
@@ -150,12 +175,18 @@ func TestGolangciLint(t *testing.T) {
 	for _, tc := range []struct {
 		name, settings, field string
 	}{
-		{"unknown-setting", "sugest: true", "sugest"},
-		{"wrong-type", `suggest: "true"`, "suggest"},
+		{"unknown-rule", "checks: [ST999]", "ST999"},
+		{"empty-element", "checks: [ST001, '', ST003]", "checks"},
+		{"wildcard", "checks: ['ST1*']", "ST1*"},
+		{"malformed-token", "checks: ['--ST003']", "--ST003"},
+		{"wrong-type", "checks: ST003", "checks"},
+		{"removed-suggest", "suggest: true", "suggest"},
+		{"removed-check-misuse", "check-misuse: false", "check-misuse"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := writeConfig(t, tc.settings, "")
-			stdout, stderr, exit := runCommand(t, root, *golangciBinary, "run", "--config", config, "./testdata/src/integration_cases")
+			// Invalid settings must fail before trying to load this missing package.
+			stdout, stderr, exit := runCommand(t, root, *golangciBinary, "run", "--config", config, "./testdata/src/does-not-exist")
 			// Exit 1 means ordinary lint findings, not a rejected configuration.
 			if exit < 2 || !strings.Contains(stdout+stderr, tc.field) {
 				t.Fatalf("expected configuration error mentioning %q, got exit %d\nstdout:\n%s\nstderr:\n%s", tc.field, exit, stdout, stderr)

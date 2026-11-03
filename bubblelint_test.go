@@ -13,10 +13,10 @@ func TestAnalyzer(t *testing.T) {
 		options *Options
 		pkg     string
 	}{
-		{"misuse", &Options{CheckMisuse: true}, "misuse"},
-		{"migration", &Options{Suggest: true}, "migration"},
-		{"clean", &Options{CheckMisuse: true, Suggest: true}, "clean"},
-		{"disabled", &Options{}, "disabled"},
+		{"misuse", &Options{Checks: []string{"ST001", "ST002", "ST003"}}, "misuse"},
+		{"migration", &Options{Checks: []string{"ST100", "ST101"}}, "migration"},
+		{"clean", nil, "clean"},
+		{"disabled", &Options{Checks: []string{}}, "disabled"},
 		{"defaults", nil, "defaults"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -31,19 +31,16 @@ func TestAnalyzer(t *testing.T) {
 
 func TestIndependentFlags(t *testing.T) {
 	first, second := New(nil), New(nil)
-	if err := first.Flags.Set("suggest", "false"); err != nil {
+	if err := first.Flags.Set("checks", "ST003"); err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Flags.Set("check-misuse", "false"); err != nil {
-		t.Fatal(err)
-	}
-	if second.Flags.Lookup("suggest").Value.String() != "true" || second.Flags.Lookup("check-misuse").Value.String() != "true" {
+	if second.Flags.Lookup("checks").Value.String() != "all" {
 		t.Fatal("analyzers share mutable settings")
 	}
 }
 
 func TestSuggestedFixes(t *testing.T) {
-	results := analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), New(&Options{CheckMisuse: true, Suggest: true}), "fixes")
+	results := analysistest.RunWithSuggestedFixes(t, analysistest.TestData(), New(nil), "fixes")
 	fixed := 0
 	for _, result := range results {
 		for _, diagnostic := range result.Diagnostics {
