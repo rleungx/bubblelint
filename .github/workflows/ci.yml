@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fail instead of silently testing a newer toolchain than the matrix requests.
+  GOTOOLCHAIN: local
+
+jobs:
+  test:
+    name: Go ${{ matrix.go }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.26.x', '1.27.x']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+      - name: Check formatting
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            printf 'Run gofmt on:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Verify dependencies
+        run: go mod verify
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: make build
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: CLI and golangci-lint integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # golangci-lint v2.13.0 requires Go 1.26 or newer to build.
+          go-version: '1.27.x'
+          check-latest: true
+      - name: Install golangci-lint v2.13.0
+        run: |
+          curl -fsSL --retry 3 \
+            https://github.com/golangci/golangci-lint/releases/download/v2.13.0/golangci-lint-2.13.0-linux-amd64.tar.gz \
+            -o "$RUNNER_TEMP/golangci-lint.tar.gz"
+          printf 'a10e8d8359d76b9e2b41da60f9d98bb26fd53c7a453caa82e0a172d6f72fd2ca  %s\n' "$RUNNER_TEMP/golangci-lint.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/golangci-lint"
+          tar -xzf "$RUNNER_TEMP/golangci-lint.tar.gz" -C "$RUNNER_TEMP/golangci-lint" --strip-components=1
+          printf '%s\n' "$RUNNER_TEMP/golangci-lint" >> "$GITHUB_PATH"
+      - name: Build and test both integrations
+        run: make integration
+      - name: Lint bubblelint with its custom plugin
+        run: ./bin/golangci-lint-bubble run ./...

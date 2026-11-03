@@ -12,5 +12,5 @@ custom:
 lint: custom
 	./bin/golangci-lint-bubble run ./...
 
-integration: custom
-	go test ./integration -count=1 -args -golangci-lint=$(CURDIR)/bin/golangci-lint-bubble
+integration: build custom
+	go test ./integration -count=1 -args -golangci-lint=$(CURDIR)/bin/golangci-lint-bubble -bubblelint=$(CURDIR)/bin/bubblelint

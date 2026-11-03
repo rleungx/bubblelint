@@ -11,7 +11,45 @@ import (
 )
 
 func TestCheckerMemoizesRelevantBindings(t *testing.T) {
-	const levels = 10
+	for _, levels := range []int{10, 20, 40} {
+		t.Run(fmt.Sprintf("levels%d", levels), func(t *testing.T) {
+			for _, c := range runStateFixture(t, helperGraphSource(levels)) {
+				// There is one context for every helper, the root, its bubble
+				// callback, and the named cleanup. Retaining unrelated ancestor
+				// bindings instead produces exponentially many contexts in this DAG.
+				if got, want := len(c.visited), 2*levels+3; got != want {
+					t.Errorf("analyzed %d contexts, want %d for %d helper levels", got, want, levels)
+				}
+				if got := namedFunctionVisits(c, "namedCleanup"); got != 1 {
+					t.Errorf("named callback analyzed in %d contexts, want 1", got)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkCheckerHelperGraph excludes package loading and type checking, so
+// allocations and execution time measure the analyzer's handling of the DAG.
+func BenchmarkCheckerHelperGraph(b *testing.B) {
+	for _, levels := range []int{10, 20, 40} {
+		b.Run(fmt.Sprintf("levels%d", levels), func(b *testing.B) {
+			b.StopTimer()
+			loaded := runStateFixture(b, helperGraphSource(levels))
+			pass := *loaded[0].pass
+			pass.Report = func(analysis.Diagnostic) {}
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.StartTimer()
+			for i := 0; i < b.N; i++ {
+				newChecker(&pass, Options{CheckMisuse: true}).run()
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(len(loaded[0].visited)), "contexts/op")
+		})
+	}
+}
+
+func helperGraphSource(levels int) string {
 	var source strings.Builder
 	source.WriteString(`package statefixture
 import (
@@ -39,17 +77,7 @@ func namedCleanup() { synctest.Wait() }
 		}
 	}
 
-	for _, c := range runStateFixture(t, source.String()) {
-		// There is one context for every helper, the root, its bubble
-		// callback, and the named cleanup. Retaining unrelated ancestor
-		// bindings instead produces exponentially many contexts in this DAG.
-		if got, want := len(c.visited), 2*levels+3; got != want {
-			t.Errorf("analyzed %d contexts, want %d for %d helper levels", got, want, levels)
-		}
-		if got := namedFunctionVisits(c, "namedCleanup"); got != 1 {
-			t.Errorf("named callback analyzed in %d contexts, want 1", got)
-		}
-	}
+	return source.String()
 }
 
 func TestCheckerPreservesCapturedBindings(t *testing.T) {
@@ -90,7 +118,7 @@ func capturedHelper(t *testing.T) {
 	}
 }
 
-func runStateFixture(t *testing.T, source string) []*checker {
+func runStateFixture(t testing.TB, source string) []*checker {
 	t.Helper()
 	dir, cleanup, err := analysistest.WriteFiles(map[string]string{
 		"statefixture/state_test.go": source,

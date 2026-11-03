@@ -94,6 +94,25 @@ func newChecker(pass *analysis.Pass, options Options) *checker {
 }
 
 func (c *checker) run() {
+	for _, file := range c.pass.Files {
+		if ast.IsGenerated(file) {
+			continue
+		}
+		for _, decl := range file.Decls {
+			if n, ok := decl.(*ast.FuncDecl); ok && n.Body != nil && n.Recv == nil {
+				obj, _ := c.pass.TypesInfo.Defs[n.Name].(*types.Func)
+				fn := function{n.Body, n.Type.Params}
+				c.functions[obj] = fn
+				if c.isTest(n, file) {
+					c.roots = append(c.roots, fn)
+				}
+			}
+		}
+	}
+	// All checks start from tests. Production-only packages need no body walks.
+	if len(c.roots) == 0 {
+		return
+	}
 	// A function value or T alias is followed only if it has one assignment.
 	writes := make(map[types.Object]int)
 	entryBindings := make(map[types.Object]bool)
@@ -118,14 +137,6 @@ func (c *checker) run() {
 			switch n := node.(type) {
 			case *ast.FuncDecl:
 				recordEntry(n.Recv)
-				if n.Body != nil && n.Recv == nil {
-					obj, _ := c.pass.TypesInfo.Defs[n.Name].(*types.Func)
-					fn := function{n.Body, n.Type.Params}
-					c.functions[obj] = fn
-					if c.isTest(n, file) {
-						c.roots = append(c.roots, fn)
-					}
-				}
 			case *ast.FuncType:
 				// Parameters and named results already have a value on entry.
 				recordEntry(n.Params)
@@ -177,16 +188,18 @@ func (c *checker) run() {
 			c.assigned[obj] = count > 1
 		}
 	}
-	for _, file := range c.pass.Files {
-		if ast.IsGenerated(file) {
-			continue
-		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			if n, ok := node.(*ast.SelectStmt); ok {
-				c.findTimeouts(n)
+	if c.options.Suggest {
+		for _, file := range c.pass.Files {
+			if ast.IsGenerated(file) {
+				continue
 			}
-			return true
-		})
+			ast.Inspect(file, func(node ast.Node) bool {
+				if n, ok := node.(*ast.SelectStmt); ok {
+					c.findTimeouts(n)
+				}
+				return true
+			})
+		}
 	}
 	for _, root := range c.roots {
 		c.invoke(root, state{}, nil, &testContext{})
@@ -274,6 +287,48 @@ func (c *checker) callable(expr ast.Expr) (function, bool) {
 		return fn, ok
 	}
 	return function{}, false
+}
+
+// callback follows a known callback body or checks a standard-library function
+// value whose body is outside this package. Diagnostics belong to the callback
+// expression at this registration site, including when it is an alias.
+func (c *checker) callback(expr ast.Expr, s state, callbackT *testContext) {
+	if fn, ok := c.callable(expr); ok {
+		c.invoke(fn, s, nil, callbackT)
+		return
+	}
+	if !c.options.CheckMisuse {
+		return
+	}
+	c.checkBubbleOnly(expr, expr, s)
+	selector, ok := c.resolve(expr).(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+	selection := c.pass.TypesInfo.Selections[selector]
+	if selection == nil || !isTestingT(selection.Recv()) || !c.named(expr, "testing", "Parallel") {
+		return
+	}
+	context, known := c.testContext(selector.X, s)
+	if selection.Kind() == types.MethodExpr {
+		known = callbackT != nil
+		if known {
+			context = *callbackT
+		}
+	}
+	if known && context.synctest {
+		c.report(expr, "ST003", "testing.T.Parallel must not be called on the *testing.T provided by synctest.Test")
+	}
+}
+
+func (c *checker) checkBubbleOnly(expr ast.Expr, site ast.Node, s state) {
+	if !c.options.CheckMisuse || s.bubble {
+		return
+	}
+	fn := c.object(expr)
+	if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "testing/synctest" && (fn.Name() == "Wait" || fn.Name() == "Sleep") {
+		c.report(site, "ST001", "synctest."+fn.Name()+" is called outside a synctest bubble on this test call path")
+	}
 }
 
 // methodCall gives method values and method expressions the same receiver and
@@ -411,21 +466,17 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 			index = 0
 		}
 		if index < len(call.Args) {
-			if callback, ok := c.callable(call.Args[index]); ok {
-				inner := *s
-				inner.bubble, inner.background, inner.async = true, false, false
-				var callbackT *testContext
-				if index == 1 {
-					callbackT = &testContext{bubble: true, synctest: true}
-				}
-				c.invoke(callback, inner, nil, callbackT)
+			inner := *s
+			inner.bubble, inner.background, inner.async = true, false, false
+			var callbackT *testContext
+			if index == 1 {
+				callbackT = &testContext{bubble: true, synctest: true}
 			}
+			c.callback(call.Args[index], inner, callbackT)
 		}
 		return
 	}
-	if c.named(call.Fun, "testing/synctest", "Wait") && !s.bubble && c.options.CheckMisuse {
-		c.report(call, "ST001", "synctest.Wait is called outside a synctest bubble on this test call path")
-	}
+	c.checkBubbleOnly(call.Fun, call, *s)
 	if c.options.Suggest && !s.bubble && !s.background && c.supportsSynctest() {
 		if s.async && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility")
@@ -439,21 +490,17 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		// Context cancellation may happen in a different bubble. Its callback
 		// cannot be assigned an execution context from registration alone.
 		if c.named(call.Fun, "time", "AfterFunc") && len(call.Args) == 2 {
-			if fn, ok := c.callable(call.Args[1]); ok {
-				worker := *s
-				worker.background = true
-				c.invoke(fn, worker, nil, nil)
-			}
+			worker := *s
+			worker.background = true
+			c.callback(call.Args[1], worker, nil)
 		}
 	}
 	if fn, receiver, args := c.methodCall(call); fn != nil && fn.Pkg() != nil {
 		if fn.Pkg().Path() == "sync" && fn.Name() == "Go" && len(args) == 1 {
 			s.async = true
-			if callback, ok := c.callable(args[0]); ok {
-				worker := *s
-				worker.background = true
-				c.invoke(callback, worker, nil, nil)
-			}
+			worker := *s
+			worker.background = true
+			c.callback(args[0], worker, nil)
 		}
 		if fn.Pkg().Path() == "testing" && isTestingT(c.pass.TypesInfo.TypeOf(receiver)) {
 			context, known := c.testContext(receiver, *s)
@@ -470,23 +517,21 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 				index = 0
 			}
 			if index >= 0 && index < len(args) {
-				if callback, ok := c.callable(args[index]); ok {
-					inner := *s
-					inner.async = false
-					var callbackT *testContext
-					if fn.Name() == "Cleanup" {
-						if !known {
-							return
-						}
-						// Cleanup runs with its owning T, possibly after the
-						// registering goroutine's bubble has exited.
-						inner.bubble = context.bubble
-					} else {
-						// Run creates an ordinary T in the caller's bubble.
-						callbackT = &testContext{bubble: s.bubble}
+				inner := *s
+				inner.async = false
+				var callbackT *testContext
+				if fn.Name() == "Cleanup" {
+					if !known {
+						return
 					}
-					c.invoke(callback, inner, nil, callbackT)
+					// Cleanup runs with its owning T, possibly after the
+					// registering goroutine's bubble has exited.
+					inner.bubble = context.bubble
+				} else {
+					// Run creates an ordinary T in the caller's bubble.
+					callbackT = &testContext{bubble: s.bubble}
 				}
+				c.callback(args[index], inner, callbackT)
 			}
 		}
 	}
