@@ -102,6 +102,13 @@ func (c *checker) findMigrationFixes() {
 			if len(m.timeouts) > 0 && constant.Compare(m.timerTotal, token.GTR, constant.MakeInt64(1<<62-1)) {
 				continue
 			}
+			// Timeout suggestions need the same positive evidence as a fix:
+			// local channels, finite producers, and a join before the deadline.
+			// A select alone could instead be a wall-clock watchdog for an
+			// unknown computation, whose timeout would stop advancing in a bubble.
+			for _, timeout := range m.timeouts {
+				c.timeouts[timeout] = true
+			}
 			var typ bytes.Buffer
 			if err := format.Node(&typ, c.pass.Fset, param.Type); err != nil {
 				continue

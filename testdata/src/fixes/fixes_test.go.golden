@@ -112,7 +112,7 @@ func TestOtherRules(t *testing.T) {
 	time.Sleep(time.Second) // want "ST100:"
 	select {
 	case <-ch:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 	}
 }
 

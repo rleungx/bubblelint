@@ -191,9 +191,9 @@ func TestTimeoutMigrationFix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			diagnosticExit, remainingFixExit := 3, 0
+			diagnosticExit := 3
 			if driver.golangci {
-				diagnosticExit, remainingFixExit = 1, 1
+				diagnosticExit = 1
 			}
 			migrated := []string{"TestClose", "TestSend", "TestCommaOK", "TestSleepAndTimeout", "TestFinalWorker"}
 
@@ -245,16 +245,16 @@ func TestTimeoutMigrationFix(t *testing.T) {
 				dir, path := writeAutofixModule(t, timeoutFixSource+unsupportedTimeoutSource)
 				original := readAutofixFile(t, path)
 				stdout, stderr, exit := driver.runMigration(t, dir, true, true, "")
-				checkAutofixExit(t, exit, remainingFixExit, stdout, stderr)
+				checkAutofixExit(t, exit, 0, stdout, stderr)
 				checkMigratedFunctions(t, path, original, migrated, "")
 				fixed := readAutofixFile(t, path)
 				stdout, stderr, exit = driver.runMigration(t, dir, false, true, "")
-				checkAutofixExit(t, exit, diagnosticExit, stdout, stderr)
-				if !strings.Contains(stdout+stderr, "ST101:") {
-					t.Fatalf("missing unsupported timeout suggestions\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				checkAutofixExit(t, exit, 0, stdout, stderr)
+				if strings.Contains(stdout+stderr, "ST101:") {
+					t.Fatalf("unexpected unsupported timeout suggestion\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 				}
 				stdout, stderr, exit = driver.runMigration(t, dir, true, true, "")
-				checkAutofixExit(t, exit, remainingFixExit, stdout, stderr)
+				checkAutofixExit(t, exit, 0, stdout, stderr)
 				checkAutofixUnchanged(t, path, fixed)
 			})
 

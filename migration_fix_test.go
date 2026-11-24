@@ -64,12 +64,12 @@ func TestMigrationRejectsUnsupportedTests(t *testing.T) {
 	for _, result := range results {
 		for _, diagnostic := range result.Diagnostics {
 			diagnostics++
-			if len(diagnostic.SuggestedFixes) != 0 {
+			if diagnostic.Category != "ST100" || len(diagnostic.SuggestedFixes) != 0 {
 				t.Errorf("unsafe migration fix: %+v", diagnostic)
 			}
 		}
 	}
-	if diagnostics != 48 {
-		t.Errorf("got %d unsupported migration diagnostics, want 48", diagnostics)
+	if diagnostics != 25 {
+		t.Errorf("got %d unsupported sleep diagnostics, want 25", diagnostics)
 	}
 }

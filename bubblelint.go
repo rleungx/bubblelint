@@ -194,20 +194,8 @@ func (c *checker) run() {
 		c.findParallelFixes()
 	}
 	if c.checks&migrationChecks != 0 {
+		c.findMigrationBarriers()
 		c.findMigrationFixes()
-	}
-	if c.checks&checkST101 != 0 {
-		for _, file := range c.pass.Files {
-			if ast.IsGenerated(file) {
-				continue
-			}
-			ast.Inspect(file, func(node ast.Node) bool {
-				if n, ok := node.(*ast.SelectStmt); ok {
-					c.findTimeouts(n)
-				}
-				return true
-			})
-		}
 	}
 	for _, root := range c.roots {
 		c.invoke(root, state{}, nil, &testContext{})
@@ -376,7 +364,7 @@ func (c *checker) testContext(expr ast.Expr, s state) (testContext, bool) {
 
 func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testContext) bool {
 	if c.checks&migrationChecks != 0 && !s.bubble && !s.suppressMigration {
-		s.suppressMigration = c.hasMigrationBarrier(fn.body)
+		s.suppressMigration = c.migrationBarriers[fn.body]
 	}
 	bindings := make(map[types.Object]testContext)
 	for obj, context := range s.tests {
@@ -464,7 +452,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		if c.checks&checkST100 != 0 && s.async && !s.suppressSleep && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}
-		if c.timeouts[call] {
+		if c.checks&checkST101 != 0 && c.timeouts[call] {
 			c.report(call, "ST101", "consider synctest.Test for this timeout-based channel assertion; verify that the channel and its producers can run in the same bubble", c.migrationFixes[call]...)
 		}
 	}
@@ -559,27 +547,6 @@ func receive(comm ast.Stmt) ast.Expr {
 		}
 	}
 	return nil
-}
-
-func (c *checker) findTimeouts(stmt *ast.SelectStmt) {
-	var timeouts []*ast.CallExpr
-	peer := false
-	for _, item := range stmt.Body.List {
-		expr := receive(item.(*ast.CommClause).Comm)
-		if expr == nil {
-			continue
-		}
-		if call, ok := expr.(*ast.CallExpr); ok && c.named(call.Fun, "time", "After") {
-			timeouts = append(timeouts, call)
-		} else if !c.pass.TypesInfo.Types[expr].IsNil() {
-			peer = true
-		}
-	}
-	if peer {
-		for _, call := range timeouts {
-			c.timeouts[call] = true
-		}
-	}
 }
 
 func (c *checker) report(node ast.Node, code, message string, fixes ...analysis.SuggestedFix) {

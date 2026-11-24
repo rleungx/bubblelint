@@ -226,7 +226,7 @@ func flowLoopDeferredStart() {
 	}
 }
 
-func TestLoopDeferredTimeoutStillReported(t *testing.T) {
+func TestLoopDeferredTimeoutWithoutProducer(t *testing.T) {
 	for i := 0; i < 1; i++ {
 		defer flowDeferredTimeout()
 	}
@@ -235,6 +235,6 @@ func TestLoopDeferredTimeoutStillReported(t *testing.T) {
 func flowDeferredTimeout() {
 	select {
 	case <-make(chan struct{}):
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 	}
 }

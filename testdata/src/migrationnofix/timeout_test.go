@@ -13,7 +13,7 @@ func TestTimeoutEqualToWorker(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -26,7 +26,7 @@ func TestTimeoutShorterThanWorker(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -41,7 +41,7 @@ func TestTimeoutShorterThanTotalSleeps(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second): // want "ST101:"
+	case <-time.After(3 * time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -55,7 +55,7 @@ func TestTimeoutWorkerSumOverflow(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -68,7 +68,7 @@ func TestTimeoutSaturatedTimers(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(1<<63 - 1): // want "ST101:"
+	case <-time.After(1<<63 - 1):
 		t.Fatal("timed out")
 	}
 }
@@ -82,7 +82,7 @@ func TestTimeoutAfterSaturatedClock(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Nanosecond): // want "ST101:"
+	case <-time.After(2 * time.Nanosecond):
 		t.Fatal("timed out")
 	}
 }
@@ -93,7 +93,7 @@ func TestTimeoutVariable(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-time.After(limit): // want "ST101:"
+	case <-time.After(limit):
 		t.Fatal("timed out")
 	}
 }
@@ -107,7 +107,7 @@ func TestTimeoutWorkerVariableDelay(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -117,7 +117,7 @@ func TestTimeoutZero(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-time.After(0): // want "ST101:"
+	case <-time.After(0):
 		t.Fatal("timed out")
 	}
 }
@@ -127,7 +127,7 @@ func TestTimeoutNegative(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-time.After(-time.Second): // want "ST101:"
+	case <-time.After(-time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -137,7 +137,7 @@ func TestTimeoutDefaultCase(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	default:
 		t.Fatal("not ready")
@@ -151,7 +151,7 @@ func TestTimeoutExtraCase(t *testing.T) {
 	select {
 	case <-done:
 	case <-extra:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -172,7 +172,7 @@ func TestTimeoutResultBinding(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case now := <-time.After(time.Second): // want "ST101:"
+	case now := <-time.After(time.Second):
 		t.Fatal(now)
 	}
 }
@@ -182,7 +182,7 @@ func TestTimeoutBlankResultBinding(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case _ = <-time.After(time.Second): // want "ST101:"
+	case _ = <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -197,7 +197,7 @@ func TestTimeoutOutstandingWorker(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 	<-other
@@ -211,7 +211,7 @@ func TestTimeoutActionAfterSignal(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -221,7 +221,7 @@ func TestTimeoutHelper(t *testing.T) {
 	go finish(done)
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -232,7 +232,7 @@ func TestTimeoutChannelAlias(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-alias:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -241,7 +241,7 @@ func TestTimeoutWithoutWorker(t *testing.T) {
 	done := make(chan struct{})
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -252,7 +252,7 @@ func TestTimeoutFunctionAlias(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-after(time.Second): // want "ST101:"
+	case <-after(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -263,7 +263,7 @@ func TestTimeoutUnsupportedBranch(t *testing.T) {
 	select {
 	case <-done:
 		t.Parallel()
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 }
@@ -273,12 +273,12 @@ func TestTimeoutRepeatedReceive(t *testing.T) {
 	go func() { close(done) }()
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out")
 	}
 	select {
 	case <-done:
-	case <-time.After(time.Second): // want "ST101:"
+	case <-time.After(time.Second):
 		t.Fatal("timed out again")
 	}
 }

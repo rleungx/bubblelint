@@ -162,10 +162,11 @@ func TestMigrationFix(t *testing.T) {
 				fixed := readAutofixFile(t, path)
 				stdout, stderr, exit = driver.runMigration(t, dir, false, true, "")
 				checkAutofixExit(t, exit, diagnosticExit, stdout, stderr)
-				for _, code := range []string{"ST100:", "ST101:"} {
-					if !strings.Contains(stdout+stderr, code) {
-						t.Errorf("missing remaining suggestion %s\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
-					}
+				if !strings.Contains(stdout+stderr, "ST100:") {
+					t.Errorf("missing remaining sleep suggestions\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				}
+				if strings.Contains(stdout+stderr, "ST101:") {
+					t.Errorf("unexpected unsupported timeout suggestion\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
 				}
 				stdout, stderr, exit = driver.runMigration(t, dir, true, true, "")
 				checkAutofixExit(t, exit, remainingFixExit, stdout, stderr)

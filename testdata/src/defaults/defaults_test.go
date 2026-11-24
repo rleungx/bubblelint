@@ -7,9 +7,9 @@ import (
 )
 
 func TestDefault(t *testing.T) {
-	go func() {}()
-	time.Sleep(time.Second) // want "ST100:"
 	done := make(chan struct{})
+	go func() { close(done) }()
+	time.Sleep(time.Second) // want "ST100:"
 	select {
 	case <-done:
 	case <-time.After(time.Second): // want "ST101:"

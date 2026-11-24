@@ -47,7 +47,7 @@ All five checks run by default:
 | ST002 | A synctest bubble started inside another bubble. |
 | ST003 | `Run`, `Parallel`, or `Deadline` called on the `*testing.T` provided by `synctest.Test`. |
 | ST100 | Sleeps used after starting asynchronous work. |
-| ST101 | Channel checks that use timeouts. |
+| ST101 | Timeout-based channel checks with verified finite, local producers. |
 
 Choose individual checks, or start with all checks and exclude some:
 
@@ -60,13 +60,26 @@ Entries apply from left to right. Use `-checks=` to disable every check.
 ST100 and ST101 suggest tests that may benefit from synctest; review these
 suggestions when a test depends on real network I/O or timing behavior.
 
-Migration suggestions are withheld in functions containing visible network
-operations or interface method calls whose implementations are unknown. The
-filter includes nested callbacks, and suppression is inherited by local helpers.
-An interface with a statically known concrete receiver remains eligible. This
-filter is conservative: unknown implementations may run entirely in memory,
-and other calls may hide I/O. Remaining suggestions still need review for bubble
-compatibility.
+Migration suggestions are withheld when visible network operations, unresolved
+interface calls, or `runtime.SetFinalizer`/`runtime.AddCleanup` registrations are
+reachable through local helpers or callbacks. Effects propagate back to callers,
+including through recursive helpers, and suppression is inherited by callees.
+Unused closures and statically unreachable branches do not suppress suggestions.
+An interface with a statically known concrete receiver remains eligible.
+Clock-polling cycles without a guaranteed positive sleep are also withheld:
+a busy goroutine prevents virtual time from advancing. Conditional sleeps and
+`Sleep(0)` do not establish that guarantee.
+
+ST101 uses the bounded producer protocol described under Automatic fixes. A
+`select` with `time.After` alone is not enough: its timeout could be a wall-clock
+watchdog for a computation that never blocks, preventing virtual time from
+advancing. Unknown producers, helpers, and more complex protocols are skipped.
+
+This analysis deliberately trades coverage for fewer misleading suggestions.
+Local helper summaries combine branches whose conditions are unknown; they do
+not specialize a helper for each argument or receiver value. Calls into other
+packages may still hide I/O from ST100's heuristic. Remaining sleep suggestions
+need review for bubble compatibility.
 
 The former `suggest` and `check-misuse` options are replaced by `checks`.
 Use `-checks=ST001,ST002,ST003` instead of `-suggest=false`, or
@@ -102,8 +115,9 @@ The fix adds the import and wraps the test body. Existing `Sleep` calls,
 `select` branches, timeout values, and assertions stay intact; time advances
 virtually inside the test.
 
-Tests with helpers, external I/O, shared state, or more complex control flow
-remain suggestions. Review the diff and run your tests after applying fixes.
+Some tests with helpers, shared state, or more complex control flow can still
+receive ST100 suggestions without a fix. ST101 skips tests outside its verified
+protocol. Review the diff and run your tests after applying fixes.
 
 ## golangci-lint
 

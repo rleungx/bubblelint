@@ -42,12 +42,12 @@ func TestChannel(t *testing.T) {
 	done := make(chan bool)
 	select {
 	case <-done:
-	case <-tm.After(tm.Millisecond): // want "ST101:"
+	case <-tm.After(tm.Millisecond):
 	}
 	select {
 	case _, ok := <-done:
 		_ = ok
-	case <-tm.After(tm.Millisecond): // want "ST101:"
+	case <-tm.After(tm.Millisecond):
 	}
 }
 
@@ -75,4 +75,17 @@ func TestWaitGroup(t *testing.T) {
 	wg.Go(func() { tm.Sleep(tm.Nanosecond) })
 	tm.Sleep(tm.Second) // want "ST100:"
 	wg.Wait()
+}
+
+func TestBoundedChannel(t *testing.T) {
+	done := make(chan bool)
+	go func() {
+		tm.Sleep(tm.Millisecond)
+		done <- true
+	}()
+	select {
+	case <-done:
+	case <-tm.After(tm.Second): // want "ST101:"
+		t.Fatal("worker did not finish")
+	}
 }
