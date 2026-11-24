@@ -49,20 +49,22 @@ type testContext struct {
 }
 
 type state struct {
-	bubble        bool
-	background    bool
-	async         bool
-	suppressSleep bool
-	tests         map[types.Object]testContext
+	bubble            bool
+	background        bool
+	async             bool
+	suppressSleep     bool
+	suppressMigration bool
+	tests             map[types.Object]testContext
 }
 
 type visitKey struct {
-	body          *ast.BlockStmt
-	bubble        bool
-	background    bool
-	async         bool
-	suppressSleep bool
-	bindings      string
+	body              *ast.BlockStmt
+	bubble            bool
+	background        bool
+	async             bool
+	suppressSleep     bool
+	suppressMigration bool
+	bindings          string
 }
 
 type checker struct {
@@ -76,8 +78,9 @@ type checker struct {
 	reported  map[token.Pos]map[string]bool
 	roots     []function
 
-	parallelFixes  map[*ast.CallExpr][]analysis.SuggestedFix
-	migrationFixes map[*ast.CallExpr][]analysis.SuggestedFix
+	parallelFixes     map[*ast.CallExpr][]analysis.SuggestedFix
+	migrationFixes    map[*ast.CallExpr][]analysis.SuggestedFix
+	migrationBarriers map[*ast.BlockStmt]bool
 }
 
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
@@ -372,6 +375,9 @@ func (c *checker) testContext(expr ast.Expr, s state) (testContext, bool) {
 }
 
 func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testContext) bool {
+	if c.checks&migrationChecks != 0 && !s.bubble && !s.suppressMigration {
+		s.suppressMigration = c.hasMigrationBarrier(fn.body)
+	}
 	bindings := make(map[types.Object]testContext)
 	for obj, context := range s.tests {
 		// Only lexical captures are available to the callee. Retaining the
@@ -422,7 +428,7 @@ func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testC
 		}
 		keyText.WriteByte(',')
 	}
-	key := visitKey{fn.body, s.bubble, s.background, s.async, s.suppressSleep, keyText.String()}
+	key := visitKey{fn.body, s.bubble, s.background, s.async, s.suppressSleep, s.suppressMigration, keyText.String()}
 	if result, seen := c.visited[key]; seen {
 		return result
 	}
@@ -454,7 +460,7 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 		return
 	}
 	c.checkBubbleOnly(call.Fun, call, *s)
-	if c.checks&migrationChecks != 0 && !s.bubble && !s.background && c.supportsSynctest() {
+	if c.checks&migrationChecks != 0 && !s.bubble && !s.background && !s.suppressMigration && c.supportsSynctest() {
 		if c.checks&checkST100 != 0 && s.async && !s.suppressSleep && c.named(call.Fun, "time", "Sleep") && c.positiveSleep(call) {
 			c.report(call, "ST100", "consider synctest.Test and explicit synchronization for this sleep after starting asynchronous work; verify bubble compatibility", c.migrationFixes[call]...)
 		}

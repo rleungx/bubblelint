@@ -15,6 +15,7 @@ func TestAnalyzer(t *testing.T) {
 	}{
 		{"misuse", &Options{Checks: []string{"ST001", "ST002", "ST003"}}, "misuse"},
 		{"migration", &Options{Checks: []string{"ST100", "ST101"}}, "migration"},
+		{"migration-barriers", nil, "migrationbarriers"},
 		{"clean", nil, "clean"},
 		{"disabled", &Options{Checks: []string{}}, "disabled"},
 		{"defaults", nil, "defaults"},

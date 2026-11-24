@@ -60,6 +60,14 @@ Entries apply from left to right. Use `-checks=` to disable every check.
 ST100 and ST101 suggest tests that may benefit from synctest; review these
 suggestions when a test depends on real network I/O or timing behavior.
 
+Migration suggestions are withheld in functions containing visible network
+operations or interface method calls whose implementations are unknown. The
+filter includes nested callbacks, and suppression is inherited by local helpers.
+An interface with a statically known concrete receiver remains eligible. This
+filter is conservative: unknown implementations may run entirely in memory,
+and other calls may hide I/O. Remaining suggestions still need review for bubble
+compatibility.
+
 The former `suggest` and `check-misuse` options are replaced by `checks`.
 Use `-checks=ST001,ST002,ST003` instead of `-suggest=false`, or
 `-checks=ST100,ST101` instead of `-check-misuse=false`.
