@@ -3,23 +3,29 @@ package bubblelint
 import (
 	"go/ast"
 	"go/constant"
-	"go/token"
 	"go/types"
 	"strings"
 
 	"golang.org/x/tools/go/cfg"
 )
 
-// Summarize visible effects before reporting any suggestions. Propagating
-// barriers backwards through the call graph handles shared and recursive
-// helpers without caching a partially explored cycle as safe.
+// Summarize visible effects before reporting suggestions. Clock reads propagate
+// through synchronous calls; barriers also propagate through workers/callbacks.
+// Both worklists handle recursive helpers without caching partial summaries.
 func (c *checker) findMigrationBarriers() {
 	c.migrationBarriers = make(map[*ast.BlockStmt]bool)
 	callers := make(map[*ast.BlockStmt]map[*ast.BlockStmt]bool)
+	clockCallers := make(map[*ast.BlockStmt]map[*ast.BlockStmt]bool)
+	clockReaders := make(map[*ast.BlockStmt]bool)
+	graphs := make(map[*ast.BlockStmt][]*cfg.Block)
+	clocks := make(map[*cfg.Block]bool)
+	sleeps := make(map[*cfg.Block]bool)
+	clockCalls := make(map[*cfg.Block][]*ast.BlockStmt)
 	var bodies []*ast.BlockStmt
 	add := func(body *ast.BlockStmt) {
 		if _, known := callers[body]; !known {
 			callers[body] = make(map[*ast.BlockStmt]bool)
+			clockCallers[body] = make(map[*ast.BlockStmt]bool)
 			bodies = append(bodies, body)
 		}
 	}
@@ -28,142 +34,154 @@ func (c *checker) findMigrationBarriers() {
 	}
 	for i := 0; i < len(bodies); i++ {
 		body := bodies[i]
-		edge := func(callee function) {
+		edge := func(callee function, block *cfg.Block, synchronous bool) {
 			add(callee.body)
 			callers[callee.body][body] = true
-		}
-		var inspect func(ast.Node)
-		inspect = func(node ast.Node) {
-			ast.Inspect(node, func(node ast.Node) bool {
-				if _, ok := node.(*ast.FuncLit); ok {
-					// A declared but unused closure has no effects. Invoked or
-					// passed callbacks get their own graph node below.
-					return false
-				}
-				if binary, ok := node.(*ast.BinaryExpr); ok && (binary.Op == token.LAND || binary.Op == token.LOR) {
-					inspect(binary.X)
-					value := c.pass.TypesInfo.Types[binary.X].Value
-					if value == nil || (binary.Op == token.LAND) == constant.BoolVal(value) {
-						inspect(binary.Y)
-					}
-					return false
-				}
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				fn := c.migrationCallTarget(call)
-				if fn != nil {
-					c.migrationBarriers[body] = c.migrationBarriers[body] || migrationBarrier(fn)
-					if callee, ok := c.functions[fn.Origin()]; ok {
-						edge(callee)
-					}
-				} else if callee, ok := c.callable(call.Fun); ok {
-					edge(callee)
-				}
-				// Treat callbacks passed to other code as potentially invoked,
-				// including aliases and named callbacks. Arguments are still
-				// evaluated normally by the enclosing AST walk.
-				for _, arg := range call.Args {
-					if callee, ok := c.callable(arg); ok {
-						edge(callee)
-					} else if fn := c.object(arg); fn != nil && migrationBarrier(fn) {
-						c.migrationBarriers[body] = true
-					}
-				}
-				return true
-			})
-		}
-		if c.migrationNodes(body, inspect) {
-			c.migrationBarriers[body] = true
-		}
-	}
-	var pending []*ast.BlockStmt
-	for _, body := range bodies {
-		if c.migrationBarriers[body] {
-			pending = append(pending, body)
-		}
-	}
-	for i := 0; i < len(pending); i++ {
-		for caller := range callers[pending[i]] {
-			if !c.migrationBarriers[caller] {
-				c.migrationBarriers[caller] = true
-				pending = append(pending, caller)
+			if synchronous {
+				clockCallers[callee.body][body] = true
+				clockCalls[block] = append(clockCalls[block], callee.body)
 			}
 		}
-	}
-}
-
-// Use the existing CFG's constant-branch and zero-range handling. Summaries
-// remain context independent: unknown branches are conservatively combined.
-// The result marks a reachable cycle that polls the clock without an explicit
-// positive sleep on every path around that cycle.
-func (c *checker) migrationNodes(body *ast.BlockStmt, visit func(ast.Node)) bool {
-	graph := cfg.New(body, func(call *ast.CallExpr) bool {
-		stops, _ := c.flowTermination(call)
-		return !stops
-	})
-	c.flowRanges(graph)
-	seen := make(map[*cfg.Block]bool)
-	sleeps := make(map[*cfg.Block]bool)
-	clocks := make(map[*cfg.Block]bool)
-	pending := []*cfg.Block{graph.Blocks[0]}
-	for i := 0; i < len(pending); i++ {
-		block := pending[i]
-		if seen[block] {
-			continue
-		}
-		seen[block] = true
-		for _, node := range block.Nodes {
-			visit(node)
-			// Only an unconditional expression statement in this CFG block
-			// breaks the cycle. Sleep(0), Gosched, mutex locking, and a sleep
-			// on just one branch cannot make virtual time advance reliably.
+		graphs[body] = c.migrationNodes(body, func(block *cfg.Block, node ast.Node) {
+			// Only a direct, guaranteed positive sleep breaks a polling cycle.
 			if expr, ok := node.(*ast.ExprStmt); ok {
 				if call, ok := ast.Unparen(expr.X).(*ast.CallExpr); ok && c.named(call.Fun, "time", "Sleep") && len(call.Args) == 1 {
 					value := c.pass.TypesInfo.Types[call.Args[0]].Value
 					sleeps[block] = sleeps[block] || value != nil && constant.Sign(value) > 0
 				}
 			}
-			ast.Inspect(node, func(node ast.Node) bool {
-				if _, ok := node.(*ast.FuncLit); ok {
-					return false
+			c.migrationCalls(node, func(call *ast.CallExpr, synchronous bool) {
+				target := *call
+				var external bool
+				target.Fun, external = c.migrationFunction(call.Fun)
+				fn := c.migrationCallTarget(&target)
+				if fn != nil {
+					c.migrationBarriers[body] = c.migrationBarriers[body] || migrationBarrier(fn)
+					if synchronous && clockOperation(fn) {
+						clocks[block], clockReaders[body] = true, true
+					}
+					if callee, ok := c.functions[fn.Origin()]; ok {
+						edge(callee, block, synchronous)
+					}
+				} else if callee, ok := c.callable(target.Fun); ok {
+					edge(callee, block, synchronous)
+				} else if !external && !c.pass.TypesInfo.Types[call.Fun].IsType() && !c.pass.TypesInfo.Types[call.Fun].IsBuiltin() {
+					// A field, container element, mutable function variable or
+					// parameter can hide effects just like an interface call.
+					c.migrationBarriers[body] = true
 				}
-				if call, ok := node.(*ast.CallExpr); ok {
-					fn := c.object(call.Fun)
-					if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "time" {
-						switch fn.Name() {
-						case "Now", "Since", "Until":
-							clocks[block] = true
-						}
+				for _, arg := range call.Args {
+					if !c.functionValue(arg) {
+						continue
+					}
+					arg, external := c.migrationFunction(arg)
+					if callee, ok := c.callable(arg); ok {
+						edge(callee, block, false)
+					} else if fn := c.object(arg); fn != nil {
+						c.migrationBarriers[body] = c.migrationBarriers[body] || migrationBarrier(fn)
+					} else if !external {
+						c.migrationBarriers[body] = true
 					}
 				}
-				return true
 			})
-		}
-		pending = append(pending, c.flowSuccessors(block)...)
+		})
 	}
-	for clock := range clocks {
-		if sleeps[clock] {
-			continue
+	propagateMigrationEffects(clockReaders, clockCallers)
+	for block, callees := range clockCalls {
+		for _, callee := range callees {
+			clocks[block] = clocks[block] || clockReaders[callee]
 		}
-		// If a clock-reading block can reach itself after removing sleep
-		// blocks, some execution can keep polling without advancing time.
-		visited := make(map[*cfg.Block]bool)
-		queue := append([]*cfg.Block(nil), c.flowSuccessors(clock)...)
-		for i := 0; i < len(queue); i++ {
-			block := queue[i]
-			if sleeps[block] || visited[block] {
-				continue
+	}
+	for body, blocks := range graphs {
+		if c.migrationClockCycle(blocks, clocks, sleeps) {
+			c.migrationBarriers[body] = true
+		}
+	}
+	propagateMigrationEffects(c.migrationBarriers, callers)
+}
+
+func propagateMigrationEffects(effects map[*ast.BlockStmt]bool, callers map[*ast.BlockStmt]map[*ast.BlockStmt]bool) {
+	var pending []*ast.BlockStmt
+	for body, effect := range effects {
+		if effect {
+			pending = append(pending, body)
+		}
+	}
+	for i := 0; i < len(pending); i++ {
+		for caller := range callers[pending[i]] {
+			if !effects[caller] {
+				effects[caller] = true
+				pending = append(pending, caller)
 			}
-			if block == clock {
-				return true
-			}
-			visited[block] = true
-			queue = append(queue, c.flowSuccessors(block)...)
+		}
+	}
+}
+
+func (c *checker) functionValue(expr ast.Expr) bool {
+	typ := c.pass.TypesInfo.TypeOf(expr)
+	if typ == nil {
+		return false
+	}
+	_, ok := typ.Underlying().(*types.Signature)
+	return ok
+}
+
+func clockOperation(fn *types.Func) bool {
+	if fn.Pkg() != nil && fn.Pkg().Path() == "time" {
+		switch fn.Name() {
+		case "Now", "Since", "Until":
+			return true
 		}
 	}
 	return false
+}
+
+// Follow immutable function results through simple local factories. Multiple
+// return sites remain unknown. External factories have the same package-boundary
+// limitation as direct external calls; their returned bodies are unavailable.
+func (c *checker) migrationFunction(expr ast.Expr) (ast.Expr, bool) {
+	seen := make(map[*ast.BlockStmt]bool)
+	for {
+		expr = c.resolve(expr)
+		index := 0
+		if id, ok := expr.(*ast.Ident); ok {
+			if result, ok := c.functionResults[c.pass.TypesInfo.ObjectOf(id)]; ok {
+				expr, index = result.call, result.index
+			}
+		}
+		call, ok := expr.(*ast.CallExpr)
+		if !ok {
+			return expr, false
+		}
+		if c.pass.TypesInfo.Types[call.Fun].IsType() && len(call.Args) == 1 {
+			expr = call.Args[0]
+			continue
+		}
+		factory, ok := c.callable(call.Fun)
+		if !ok {
+			return expr, c.object(call.Fun) != nil
+		}
+		if seen[factory.body] {
+			return expr, false
+		}
+		seen[factory.body] = true
+		var result *ast.ReturnStmt
+		multiple := false
+		ast.Inspect(factory.body, func(node ast.Node) bool {
+			if _, ok := node.(*ast.FuncLit); ok {
+				return false
+			}
+			if ret, ok := node.(*ast.ReturnStmt); ok {
+				multiple = multiple || result != nil
+				result = ret
+			}
+			return true
+		})
+		if multiple || result == nil || index >= len(result.Results) {
+			return expr, false
+		}
+		expr = result.Results[index]
+	}
 }
 
 func migrationBarrier(fn *types.Func) bool {

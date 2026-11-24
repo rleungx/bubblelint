@@ -14,6 +14,7 @@ import (
 )
 
 func TestClose(t *testing.T) {
+	t.Helper()
 	done := make(chan struct{})
 	go func() {
 		time.Sleep(time.Millisecond)
@@ -256,6 +257,35 @@ func TestTimeoutMigrationFix(t *testing.T) {
 				stdout, stderr, exit = driver.runMigration(t, dir, true, true, "")
 				checkAutofixExit(t, exit, 0, stdout, stderr)
 				checkAutofixUnchanged(t, path, fixed)
+			})
+
+			t.Run("suggest-subtest-without-editing", func(t *testing.T) {
+				source := `package autofix
+import ("testing"; "time")
+func TestSubtest(t *testing.T) {
+	t.Run("worker", func(t *testing.T) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { close(done) }()
+		select { case <-done: case <-time.After(time.Second): t.Fatal("timeout") }
+	})
+}`
+				dir, path := writeAutofixModule(t, source)
+				original := readAutofixFile(t, path)
+				stdout, stderr, exit := driver.runMigration(t, dir, false, true, "ST101")
+				checkAutofixExit(t, exit, diagnosticExit, stdout, stderr)
+				if !strings.Contains(stdout+stderr, "ST101:") {
+					t.Fatalf("missing subtest suggestion\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				}
+				stdout, stderr, exit = driver.runMigration(t, dir, true, true, "ST101")
+				fixExit := 0
+				if driver.golangci {
+					fixExit = 1
+				}
+				checkAutofixExit(t, exit, fixExit, stdout, stderr)
+				checkAutofixUnchanged(t, path, original)
+				stdout, stderr, exit = driver.runMigration(t, dir, false, true, "ST101")
+				checkAutofixExit(t, exit, diagnosticExit, stdout, stderr)
 			})
 
 			t.Run("preserve-assertion-failure", func(t *testing.T) {

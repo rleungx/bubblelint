@@ -61,19 +61,28 @@ ST100 and ST101 suggest tests that may benefit from synctest; review these
 suggestions when a test depends on real network I/O or timing behavior.
 
 Migration suggestions are withheld when visible network operations, unresolved
-interface calls, or `runtime.SetFinalizer`/`runtime.AddCleanup` registrations are
-reachable through local helpers or callbacks. Effects propagate back to callers,
+interface or function-value calls, or `runtime.SetFinalizer`/`runtime.AddCleanup`
+registrations are reachable through local helpers or callbacks. Effects propagate back to callers,
 including through recursive helpers, and suppression is inherited by callees.
 Unused closures and statically unreachable branches do not suppress suggestions.
-An interface with a statically known concrete receiver remains eligible.
-Clock-polling cycles without a guaranteed positive sleep are also withheld:
+An interface with a statically known concrete receiver remains eligible. Function
+values in fields or containers that cannot be resolved are treated as unknown.
+Immutable function results are followed through local factories with one return
+site; external factories share the package-boundary limitation described below.
+Clock reads propagate through synchronous local helpers. Clock-polling cycles
+without a guaranteed positive sleep are also withheld:
 a busy goroutine prevents virtual time from advancing. Conditional sleeps and
-`Sleep(0)` do not establish that guarantee.
+`Sleep(0)` do not establish that guarantee. Finite ranges over integers, strings,
+arrays, and slices do not establish a polling cycle by themselves; nested
+unbounded loops and restarting gotos still can.
 
-ST101 uses the bounded producer protocol described under Automatic fixes. A
-`select` with `time.After` alone is not enough: its timeout could be a wall-clock
+ST101 uses the bounded producer protocol described under Automatic fixes,
+including inside subtests and local helpers. Diagnostic eligibility is independent
+of whether the source can be edited automatically. A `select` with `time.After`
+alone is not enough: its timeout could be a wall-clock
 watchdog for a computation that never blocks, preventing virtual time from
-advancing. Unknown producers, helpers, and more complex protocols are skipped.
+advancing. Unknown producers, producers implemented by helpers, and more complex
+protocols are skipped. A direct `t.Helper()` call does not prevent recognition.
 
 This analysis deliberately trades coverage for fewer misleading suggestions.
 Local helper summaries combine branches whose conditions are unknown; they do

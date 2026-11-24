@@ -22,7 +22,7 @@ import (
 // time. This prevents a root from exiting while a worker is still sleeping.
 type migration struct {
 	c          *checker
-	test       types.Object
+	tests      map[types.Object]bool
 	values     map[types.Object]bool
 	channels   map[types.Object]*migrationChannel
 	workers    int
@@ -81,33 +81,9 @@ func (c *checker) findMigrationFixes() {
 			if name.Name == "_" || name.Name == strings.TrimSuffix(qualifier, ".Test") || shadowedType || c.assigned[obj] || hasGoDirective(fn.Doc) {
 				continue
 			}
-			m := &migration{
-				c: c, test: obj,
-				values:     make(map[types.Object]bool),
-				channels:   make(map[types.Object]*migrationChannel),
-				timerTotal: constant.MakeInt64(0),
-			}
-			for _, stmt := range fn.Body.List {
-				if _, ok := stmt.(*ast.GoStmt); ok {
-					m.workers++
-				}
-			}
-			if m.workers == 0 || !m.statements(fn.Body.List) || m.started != m.workers || m.joined != m.workers || len(m.sleeps)+len(m.timeouts) == 0 {
+			m := c.migrationProtocol(fn.Body, map[types.Object]bool{obj: true})
+			if m == nil {
 				continue
-			}
-			// Keep ample headroom above synctest's January 2000 epoch. Timer
-			// deadline saturation could otherwise turn a strict delay bound
-			// into a tie. Sum every positive duration, including branch bodies,
-			// using arbitrary precision so the check itself cannot overflow.
-			if len(m.timeouts) > 0 && constant.Compare(m.timerTotal, token.GTR, constant.MakeInt64(1<<62-1)) {
-				continue
-			}
-			// Timeout suggestions need the same positive evidence as a fix:
-			// local channels, finite producers, and a join before the deadline.
-			// A select alone could instead be a wall-clock watchdog for an
-			// unknown computation, whose timeout would stop advancing in a bubble.
-			for _, timeout := range m.timeouts {
-				c.timeouts[timeout] = true
 			}
 			var typ bytes.Buffer
 			if err := format.Node(&typ, c.pass.Fset, param.Type); err != nil {
@@ -128,6 +104,46 @@ func (c *checker) findMigrationFixes() {
 			for _, timeout := range m.timeouts {
 				c.migrationFixes[timeout] = fix
 			}
+		}
+	}
+}
+
+// The semantic protocol is shared by suggestions and edits. Source-editing
+// restrictions (imports, directives, test references) belong only to the fixer.
+func (c *checker) migrationProtocol(body *ast.BlockStmt, tests map[types.Object]bool) *migration {
+	m := &migration{
+		c: c, tests: tests,
+		values:     make(map[types.Object]bool),
+		channels:   make(map[types.Object]*migrationChannel),
+		timerTotal: constant.MakeInt64(0),
+	}
+	for _, stmt := range body.List {
+		if _, ok := stmt.(*ast.GoStmt); ok {
+			m.workers++
+		}
+	}
+	if m.workers == 0 || !m.statements(body.List) || m.started != m.workers || m.joined != m.workers || len(m.sleeps)+len(m.timeouts) == 0 {
+		return nil
+	}
+	// Leave headroom above synctest's epoch so timer saturation cannot turn a
+	// strict bound into a tie. Arbitrary precision also avoids analysis overflow.
+	if len(m.timeouts) > 0 && constant.Compare(m.timerTotal, token.GTR, constant.MakeInt64(1<<62-1)) {
+		return nil
+	}
+	return m
+}
+
+func (c *checker) findMigrationTimeouts(body *ast.BlockStmt, s state) {
+	if c.checks&checkST101 == 0 || s.bubble || s.background || s.suppressMigration || !c.supportsSynctest() {
+		return
+	}
+	tests := make(map[types.Object]bool)
+	for obj := range s.tests {
+		tests[obj] = true
+	}
+	if m := c.migrationProtocol(body, tests); m != nil {
+		for _, timeout := range m.timeouts {
+			c.timeouts[timeout] = true
 		}
 	}
 }
@@ -158,7 +174,9 @@ func (m *migration) statements(statements []ast.Stmt) bool {
 			}
 		case *ast.ExprStmt:
 			if call, ok := ast.Unparen(s.X).(*ast.CallExpr); ok {
-				if m.sleep(call) {
+				if m.testCall(call, "Helper") && len(call.Args) == 0 {
+					continue
+				} else if m.sleep(call) {
 					if m.started > 0 && m.c.positiveSleep(call) {
 						m.sleeps = append(m.sleeps, call)
 					}
@@ -400,7 +418,7 @@ func (m *migration) assertion(call *ast.CallExpr) bool {
 		return false
 	}
 	id, ok := ast.Unparen(sel.X).(*ast.Ident)
-	if !ok || m.c.pass.TypesInfo.ObjectOf(id) != m.test {
+	if !ok || !m.tests[m.c.pass.TypesInfo.ObjectOf(id)] {
 		return false
 	}
 	switch sel.Sel.Name {
@@ -414,6 +432,15 @@ func (m *migration) assertion(call *ast.CallExpr) bool {
 		}
 	}
 	return true
+}
+
+func (m *migration) testCall(call *ast.CallExpr, name string) bool {
+	method, receiver, _ := m.c.methodCall(call)
+	if method == nil || method.Pkg() == nil || method.Pkg().Path() != "testing" || method.Name() != name {
+		return false
+	}
+	id, ok := ast.Unparen(receiver).(*ast.Ident)
+	return ok && m.tests[m.c.pass.TypesInfo.ObjectOf(id)]
 }
 
 func (m *migration) scalar(expr ast.Expr) bool {

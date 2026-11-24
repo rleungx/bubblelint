@@ -73,3 +73,19 @@ func TestMigrationRejectsUnsupportedTests(t *testing.T) {
 		t.Errorf("got %d unsupported sleep diagnostics, want 25", diagnostics)
 	}
 }
+
+func TestMigrationSuggestionsWithoutFixes(t *testing.T) {
+	results := analysistest.Run(t, analysistest.TestData(), New(&Options{Checks: []string{"ST101"}}), "migrationsuggestions")
+	diagnostics := 0
+	for _, result := range results {
+		for _, diagnostic := range result.Diagnostics {
+			diagnostics++
+			if diagnostic.Category != "ST101" || len(diagnostic.SuggestedFixes) != 0 {
+				t.Errorf("unexpected timeout suggestion or unsafe fix: %+v", diagnostic)
+			}
+		}
+	}
+	if diagnostics != 6 {
+		t.Errorf("got %d timeout suggestions, want 6", diagnostics)
+	}
+}

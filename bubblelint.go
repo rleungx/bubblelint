@@ -41,6 +41,11 @@ type function struct {
 	params *ast.FieldList
 }
 
+type functionResult struct {
+	call  *ast.CallExpr
+	index int
+}
+
 // testContext separates the T's cleanup execution context from the restrictions
 // on the special T supplied by synctest.Test. A missing binding is unknown.
 type testContext struct {
@@ -68,15 +73,16 @@ type visitKey struct {
 }
 
 type checker struct {
-	pass      *analysis.Pass
-	checks    checkSet
-	functions map[*types.Func]function
-	aliases   map[types.Object]ast.Expr
-	assigned  map[types.Object]bool
-	timeouts  map[*ast.CallExpr]bool
-	visited   map[visitKey]bool
-	reported  map[token.Pos]map[string]bool
-	roots     []function
+	pass            *analysis.Pass
+	checks          checkSet
+	functions       map[*types.Func]function
+	aliases         map[types.Object]ast.Expr
+	functionResults map[types.Object]functionResult
+	assigned        map[types.Object]bool
+	timeouts        map[*ast.CallExpr]bool
+	visited         map[visitKey]bool
+	reported        map[token.Pos]map[string]bool
+	roots           []function
 
 	parallelFixes     map[*ast.CallExpr][]analysis.SuggestedFix
 	migrationFixes    map[*ast.CallExpr][]analysis.SuggestedFix
@@ -86,12 +92,13 @@ type checker struct {
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
 	return &checker{
 		pass: pass, checks: checks,
-		functions: make(map[*types.Func]function),
-		aliases:   make(map[types.Object]ast.Expr),
-		assigned:  make(map[types.Object]bool),
-		timeouts:  make(map[*ast.CallExpr]bool),
-		visited:   make(map[visitKey]bool),
-		reported:  make(map[token.Pos]map[string]bool),
+		functions:       make(map[*types.Func]function),
+		aliases:         make(map[types.Object]ast.Expr),
+		functionResults: make(map[types.Object]functionResult),
+		assigned:        make(map[types.Object]bool),
+		timeouts:        make(map[*ast.CallExpr]bool),
+		visited:         make(map[visitKey]bool),
+		reported:        make(map[token.Pos]map[string]bool),
 	}
 }
 
@@ -150,6 +157,10 @@ func (c *checker) run() {
 						writes[obj]++
 						if len(n.Lhs) == len(n.Rhs) {
 							c.aliases[obj] = n.Rhs[i]
+						} else if len(n.Rhs) == 1 && c.functionValue(lhs) {
+							if call, ok := ast.Unparen(n.Rhs[0]).(*ast.CallExpr); ok {
+								c.functionResults[obj] = functionResult{call, i}
+							}
 						}
 					}
 				}
@@ -165,6 +176,10 @@ func (c *checker) run() {
 					writes[obj]++
 					if len(n.Names) == len(n.Values) {
 						c.aliases[obj] = n.Values[i]
+					} else if len(n.Values) == 1 && c.functionValue(id) {
+						if call, ok := ast.Unparen(n.Values[0]).(*ast.CallExpr); ok {
+							c.functionResults[obj] = functionResult{call, i}
+						}
 					}
 				}
 			case *ast.IncDecStmt:
@@ -185,6 +200,9 @@ func (c *checker) run() {
 		}
 	}
 	for obj, count := range writes {
+		if count != 1 {
+			delete(c.functionResults, obj)
+		}
 		c.assigned[obj] = count > 0
 		if entryBindings[obj] {
 			c.assigned[obj] = count > 1
@@ -422,6 +440,7 @@ func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testC
 	}
 	// Seed the result before descending so recursive helpers terminate.
 	c.visited[key] = s.async
+	c.findMigrationTimeouts(fn.body, s)
 	result := c.flowBody(fn.body, s)
 	c.visited[key] = result
 	return result
