@@ -5,12 +5,14 @@ import (
 	"strings"
 )
 
-// Options selects checks to run. A nil Checks slice enables all checks;
+// Options selects checks to run. A nil Checks slice enables misuse checks;
 // an empty slice disables all checks. Entries are applied from left to right,
 // starting with no checks: use a rule ID or "all" to enable checks, and prefix
 // either with "-" to disable them.
 type Options struct {
 	Checks []string
+	// ExplainMigration reports why a timeout or sleep candidate was withheld.
+	ExplainMigration bool
 }
 
 // Validate reports invalid check names or selection syntax.
@@ -27,9 +29,10 @@ const (
 	checkST003
 	checkST100
 	checkST101
+	checkST102
 	misuseChecks    = checkST001 | checkST002 | checkST003
 	migrationChecks = checkST100 | checkST101
-	allChecks       = misuseChecks | migrationChecks
+	allChecks       = misuseChecks | migrationChecks | checkST102
 )
 
 func checkID(name string) checkSet {
@@ -44,6 +47,8 @@ func checkID(name string) checkSet {
 		return checkST100
 	case "ST101":
 		return checkST101
+	case "ST102":
+		return checkST102
 	case "all":
 		return allChecks
 	}
@@ -52,7 +57,7 @@ func checkID(name string) checkSet {
 
 func parseChecks(entries []string) (checkSet, error) {
 	if entries == nil {
-		return allChecks, nil
+		return misuseChecks, nil
 	}
 	var enabled checkSet
 	for _, entry := range entries {
@@ -60,7 +65,7 @@ func parseChecks(entries []string) (checkSet, error) {
 		name, disable := strings.CutPrefix(entry, "-")
 		checks := checkID(name)
 		if checks == 0 {
-			return 0, fmt.Errorf("checks: invalid entry %q; use all or ST001, ST002, ST003, ST100, ST101, optionally prefixed with '-'", entry)
+			return 0, fmt.Errorf("checks: invalid entry %q; use all or ST001, ST002, ST003, ST100, ST101, ST102, optionally prefixed with '-'", entry)
 		}
 		if disable {
 			enabled &^= checks
@@ -81,7 +86,7 @@ type checkSelection struct {
 }
 
 func newCheckSelection(options *Options) *checkSelection {
-	entries := []string{"all"}
+	entries := []string{"ST001", "ST002", "ST003"}
 	if options != nil && options.Checks != nil {
 		entries = append([]string{}, options.Checks...)
 	}

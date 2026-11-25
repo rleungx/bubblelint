@@ -275,8 +275,21 @@ func (m *migration) worker(call *ast.CallExpr) bool {
 	if !ok || len(call.Args) != 0 || len(fn.Type.Params.List) != 0 || len(fn.Body.List) == 0 {
 		return false
 	}
+	statements := fn.Body.List
+	var channel ast.Expr
+	if deferred, ok := statements[0].(*ast.DeferStmt); ok {
+		// The remaining statements must be constant sleeps, so this close
+		// still runs only after the worker's bounded delay has elapsed.
+		if len(deferred.Call.Args) != 1 || !m.builtin(deferred.Call.Fun, "close") {
+			return false
+		}
+		channel = deferred.Call.Args[0]
+		statements = statements[1:]
+	} else {
+		statements = statements[:len(statements)-1]
+	}
 	delay := constant.MakeInt64(0)
-	for _, stmt := range fn.Body.List[:len(fn.Body.List)-1] {
+	for _, stmt := range statements {
 		expr, ok := stmt.(*ast.ExprStmt)
 		if !ok {
 			return false
@@ -290,21 +303,22 @@ func (m *migration) worker(call *ast.CallExpr) bool {
 			delay = constant.BinaryOp(delay, token.ADD, value)
 		}
 	}
-	var channel ast.Expr
-	switch last := fn.Body.List[len(fn.Body.List)-1].(type) {
-	case *ast.SendStmt:
-		if m.c.pass.TypesInfo.Types[last.Value].Value == nil || !migrationScalar(m.c.pass.TypesInfo.TypeOf(last.Value)) {
+	if channel == nil {
+		switch last := fn.Body.List[len(fn.Body.List)-1].(type) {
+		case *ast.SendStmt:
+			if m.c.pass.TypesInfo.Types[last.Value].Value == nil || !migrationScalar(m.c.pass.TypesInfo.TypeOf(last.Value)) {
+				return false
+			}
+			channel = last.Chan
+		case *ast.ExprStmt:
+			call, ok := ast.Unparen(last.X).(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 || !m.builtin(call.Fun, "close") {
+				return false
+			}
+			channel = call.Args[0]
+		default:
 			return false
 		}
-		channel = last.Chan
-	case *ast.ExprStmt:
-		call, ok := ast.Unparen(last.X).(*ast.CallExpr)
-		if !ok || len(call.Args) != 1 || !m.builtin(call.Fun, "close") {
-			return false
-		}
-		channel = call.Args[0]
-	default:
-		return false
 	}
 	ch := m.channel(channel)
 	if ch == nil || ch.started {

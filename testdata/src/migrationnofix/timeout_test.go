@@ -282,3 +282,30 @@ func TestTimeoutRepeatedReceive(t *testing.T) {
 		t.Fatal("timed out again")
 	}
 }
+
+func TestDeferredCloseAfterBlockedReceive(t *testing.T) {
+	done := make(chan struct{})
+	blocked := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-blocked
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestDeferredCloseEqualToTimeout(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(time.Second)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out")
+	}
+}

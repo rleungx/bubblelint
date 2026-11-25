@@ -15,21 +15,30 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// New returns an independent analyzer. Nil enables all checks. Invalid Options
+// New returns an independent analyzer. Nil enables misuse checks. Invalid Options
 // are reported when the analyzer runs; use Options.Validate to check them early.
 func New(options *Options) *analysis.Analyzer {
 	selection := newCheckSelection(options)
+	explain := options != nil && options.ExplainMigration
+	effects := newMigrationEffectsAnalyzer(func() bool {
+		return selection.enabled&(migrationChecks|checkST102) != 0 || explain
+	})
 	a := &analysis.Analyzer{
-		Name: "bubblelint",
-		Doc:  "check testing/synctest usage and find timeout-based concurrent tests",
+		Name:     "bubblelint",
+		Doc:      "check testing/synctest usage and find timeout-based concurrent tests",
+		Requires: []*analysis.Analyzer{effects},
 	}
-	a.Flags.Var(selection, "checks", "comma-separated checks: all, ST001, ST002, ST003, ST100, ST101; prefix a name with '-' to disable it")
+	a.Flags.Var(selection, "checks", "comma-separated checks: all, ST001, ST002, ST003, ST100, ST101, ST102; prefix a name with '-' to disable it")
+	a.Flags.BoolVar(&explain, "explain-migration", explain, "explain blocked and unproven migration candidates; does not offer fixes")
 	a.Run = func(pass *analysis.Pass) (any, error) {
 		if selection.err != nil {
 			return nil, selection.err
 		}
-		if selection.enabled != 0 {
-			newChecker(pass, selection.enabled).run()
+		if selection.enabled != 0 || explain {
+			c := newChecker(pass, selection.enabled)
+			c.explainMigration = explain
+			c.effects, _ = pass.ResultOf[effects].(*migrationEffectsResult)
+			c.run()
 		}
 		return nil, nil
 	}
@@ -87,6 +96,15 @@ type checker struct {
 	parallelFixes     map[*ast.CallExpr][]analysis.SuggestedFix
 	migrationFixes    map[*ast.CallExpr][]analysis.SuggestedFix
 	migrationBarriers map[*ast.BlockStmt]bool
+	reviewBarriers    map[*ast.BlockStmt]bool
+	effects           *migrationEffectsResult
+	explainMigration  bool
+	effectConditional bool
+	coarseEffects     *migrationEffectsResult
+	programs          map[*ast.BlockStmt]*migrationProgram
+	programBuilding   map[*ast.BlockStmt]bool
+	objectReferences  map[ast.Expr]int
+	contextProofs     map[*ast.BlockStmt][]migrationSSAProof
 }
 
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
@@ -102,7 +120,7 @@ func newChecker(pass *analysis.Pass, checks checkSet) *checker {
 	}
 }
 
-func (c *checker) run() {
+func (c *checker) collect(includeProduction bool) {
 	for _, file := range c.pass.Files {
 		if ast.IsGenerated(file) {
 			continue
@@ -118,8 +136,8 @@ func (c *checker) run() {
 			}
 		}
 	}
-	// All checks start from tests. Production-only packages need no body walks.
-	if len(c.roots) == 0 {
+	// Misuse checks start at tests; migration summaries also inspect production.
+	if len(c.roots) == 0 && !includeProduction {
 		return
 	}
 	// A function value or T alias is followed only if it has one assignment.
@@ -208,11 +226,22 @@ func (c *checker) run() {
 			c.assigned[obj] = count > 1
 		}
 	}
+}
+
+func (c *checker) run() {
+	c.collect(false)
+	if len(c.roots) == 0 {
+		return
+	}
 	if c.checks&checkST003 != 0 {
 		c.findParallelFixes()
 	}
+	if c.effects != nil {
+		c.migrationBarriers = c.effects.barriers
+		c.reviewBarriers = c.effects.reviewBarriers
+		c.refineMigrationContexts()
+	}
 	if c.checks&migrationChecks != 0 {
-		c.findMigrationBarriers()
 		c.findMigrationFixes()
 	}
 	for _, root := range c.roots {
@@ -381,7 +410,7 @@ func (c *checker) testContext(expr ast.Expr, s state) (testContext, bool) {
 }
 
 func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testContext) bool {
-	if c.checks&migrationChecks != 0 && !s.bubble && !s.suppressMigration {
+	if c.checks&(migrationChecks|checkST102) != 0 && !s.bubble && !s.suppressMigration {
 		s.suppressMigration = c.migrationBarriers[fn.body]
 	}
 	bindings := make(map[types.Object]testContext)
@@ -440,8 +469,14 @@ func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testC
 	}
 	// Seed the result before descending so recursive helpers terminate.
 	c.visited[key] = s.async
+	if c.checks&checkST102 != 0 && !s.bubble && !s.background && !s.suppressMigration && len(s.tests) != 0 {
+		c.findReviewCandidates(fn.body, s)
+	}
 	c.findMigrationTimeouts(fn.body, s)
 	result := c.flowBody(fn.body, s)
+	if c.explainMigration && !s.bubble && !s.background && len(s.tests) != 0 {
+		c.explainMigrationCandidate(fn.body)
+	}
 	c.visited[key] = result
 	return result
 }
@@ -579,8 +614,13 @@ func (c *checker) report(node ast.Node, code, message string, fixes ...analysis.
 		return
 	}
 	c.reported[node.Pos()][code] = true
+	var related []analysis.RelatedInformation
+	if code == "ST100" || code == "ST101" || code == "ST102" {
+		related = append(c.migrationEntryInformation(node), c.migrationContextInformation(node)...)
+	}
 	c.pass.Report(analysis.Diagnostic{
 		Pos: node.Pos(), End: node.End(), Category: code, Message: code + ": " + message,
 		SuggestedFixes: fixes,
+		Related:        related,
 	})
 }

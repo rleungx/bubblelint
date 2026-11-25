@@ -141,3 +141,28 @@ func TestEarlyReturn(t *testing.T) {
 		t.Fatal("timed out")
 	}
 }
+
+func TestDeferredClose(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(time.Millisecond)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST101:"
+		t.Fatal("timed out")
+	}
+}
+
+func TestDeferredCloseWithoutSleep(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST101:"
+		t.Fatal("timed out")
+	}
+}

@@ -46,10 +46,11 @@ func TestCLI(t *testing.T) {
 		args  []string
 		codes []string
 	}{
-		{"defaults", nil, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"defaults", nil, []string{"ST001", "ST002", "ST003"}},
 		{"misuse-only", []string{"-checks=ST001,ST002,ST003"}, []string{"ST001", "ST002", "ST003"}},
 		{"all-enabled", []string{"-checks=all"}, []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
 		{"migration-only", []string{"-checks=ST100,ST101"}, []string{"ST100", "ST101"}},
+		{"review-only", []string{"-checks=ST102"}, nil},
 		{"ST001", []string{"-checks=ST001"}, []string{"ST001"}},
 		{"ST002", []string{"-checks=ST002"}, []string{"ST002"}},
 		{"ST003", []string{"-checks=ST003"}, []string{"ST003"}},
@@ -102,6 +103,25 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+func TestCLIReviewCandidates(t *testing.T) {
+	if *cliBinary == "" {
+		t.Skip("run make integration to test the standalone binary")
+	}
+	root := repositoryRoot(t)
+	want := expectedDiagnostics(t, root, "migrationreview", []string{"ST102"})
+	stdout, stderr, exit := runCommand(t, root, *cliBinary, "-checks=ST102", "./testdata/src/migrationreview")
+	if exit != 3 {
+		t.Fatalf("exit code %d, want 3\nstdout:\n%s\nstderr:\n%s", exit, stdout, stderr)
+	}
+	var got []diagnostic
+	for _, match := range cliPattern.FindAllStringSubmatch(stdout+stderr, -1) {
+		line, _ := strconv.Atoi(match[2])
+		column, _ := strconv.Atoi(match[3])
+		got = append(got, diagnostic{relativePath(t, root, match[1]), line, column, match[4]})
+	}
+	checkDiagnostics(t, got, want, stdout, stderr)
+}
+
 func TestGolangciLint(t *testing.T) {
 	if *golangciBinary == "" {
 		t.Skip("run make integration to test the custom binary")
@@ -111,10 +131,11 @@ func TestGolangciLint(t *testing.T) {
 		name, settings, exclusions, pkg string
 		codes                           []string
 	}{
-		{"defaults", "", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
+		{"defaults", "", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
 		{"misuse-only", "checks: [ST001, ST002, ST003]", "", "integration_cases", []string{"ST001", "ST002", "ST003"}},
 		{"all-enabled", "checks: [all]", "", "integration_cases", []string{"ST001", "ST002", "ST003", "ST100", "ST101"}},
 		{"migration-only", "checks: [ST100, ST101]", "", "integration_cases", []string{"ST100", "ST101"}},
+		{"review-only", "checks: [ST102]", "", "migrationreview", []string{"ST102"}},
 		{"ST001", "checks: [ST001]", "", "integration_cases", []string{"ST001"}},
 		{"ST002", "checks: [ST002]", "", "integration_cases", []string{"ST002"}},
 		{"ST003", "checks: [ST003]", "", "integration_cases", []string{"ST003"}},
@@ -127,11 +148,11 @@ func TestGolangciLint(t *testing.T) {
 		{"empty-selection", "checks: []", "", "integration_cases", nil},
 		{"all-disabled", "checks: ['-all']", "", "integration_cases", nil},
 		{"misuse-regressions", "", "", "misuse", []string{"ST001", "ST002", "ST003"}},
-		{"migration-regressions", "", "", "migration", []string{"ST100", "ST101"}},
+		{"migration-regressions", "checks: [ST100, ST101]", "", "migration", []string{"ST100", "ST101"}},
 		{"clean", "", "", "clean", nil},
 		{"nolint", "", "", "integration_nolint", []string{"ST001"}},
 		{
-			"configured-exclusion", "",
+			"configured-exclusion", "checks: [all]",
 			"    rules:\n      - path: 'integration_cases/.*\\.go$'\n        linters: [bubblelint]\n        text: 'ST001:'\n",
 			"integration_cases", []string{"ST002", "ST003", "ST100", "ST101"},
 		},

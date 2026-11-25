@@ -29,7 +29,7 @@ func TestAfterFunc(t *testing.T) {
 	defer cancel()
 	context.AfterFunc(ctx, func() {})
 	cancel()
-	tm.Sleep(tm.Millisecond) // want "ST100:"
+	tm.Sleep(tm.Millisecond)
 }
 
 func TestTimerCallback(t *testing.T) {

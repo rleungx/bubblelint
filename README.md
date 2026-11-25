@@ -39,7 +39,8 @@ func TestWorker(t *testing.T) {
 
 ## Checks
 
-All five checks run by default:
+ST001–ST003 run by default. ST100 and ST101 suggest constrained migrations;
+ST102 identifies cases for manual review:
 
 | Code | What it finds |
 | --- | --- |
@@ -48,27 +49,63 @@ All five checks run by default:
 | ST003 | `Run`, `Parallel`, or `Deadline` called on the `*testing.T` provided by `synctest.Test`. |
 | ST100 | Sleeps used after starting asynchronous work. |
 | ST101 | Timeout-based channel checks with verified finite, local producers. |
+| ST102 | Timeout-based completion or readiness checks with a local worker. The worker and its dependencies must be reviewed. |
 
 Choose individual checks, or start with all checks and exclude some:
 
 ```sh
 bubblelint -checks=ST003 ./...
+bubblelint -checks=ST100,ST101 ./...
+bubblelint -checks=ST102 ./...
 bubblelint -checks=all,-ST101 ./...
 ```
 
 Entries apply from left to right. Use `-checks=` to disable every check.
-ST100 and ST101 suggest tests that may benefit from synctest; review these
-suggestions when a test depends on real network I/O or timing behavior.
+ST100 and ST101 suggest tests that may benefit from synctest; review how
+virtual time affects their assertions and cleanup.
+ST102 checks two local patterns after applying the migration barriers below:
+a timeout waiting for a worker that calls a timer-using helper, or a timeout
+waiting on a local channel before receiving the worker's result or completion
+signal. The worker can
+signal by closing a channel or sending a result of any type. Immutable channel
+aliases and locally initialized struct fields refer to the same channel.
+For readiness checks, local assignments must connect the observed channel to
+an object or value the worker can access. That connection does not prove that
+the worker produces the signal.
 
-Migration suggestions are withheld when visible network operations, unresolved
-interface or function-value calls, or `runtime.SetFinalizer`/`runtime.AddCleanup`
-registrations are reachable through local helpers or callbacks. Effects propagate back to callers,
+ST102 follows reachable statements and checks that the timeout branch reports
+a test failure. Negative assertions that expect the timer to fire are skipped.
+It currently handles one inline worker followed by a select in a test, subtest,
+or local test helper; more complex worker and control-flow patterns can be
+missed. Protocols covered by ST101 do not also receive ST102 diagnostics.
+
+ST102 skips unknown calls, clock reads, synchronization primitives whose
+lifecycle is not modeled, shared package variables, recursive helpers, and
+unbounded loops. Its observed and completion channels must be created inside
+the proposed test or subtest boundary. It never offers an automatic fix:
+signal origin, assertion semantics, and cleanup still need review. A reachable
+timer call in a helper does not establish that every execution path reaches it.
+Assertions that depend on distinct timestamps may also need an explicit
+virtual-time advance to keep testing the intended ordering.
+
+All migration checks withhold suggestions when visible network operations,
+mutex lock calls, unresolved interface or function-value calls, or
+`runtime.SetFinalizer`/`runtime.AddCleanup` registrations are reachable through
+local helpers or callbacks. Calls without an available body also block
+suggestions unless the operation has an explicit standard-library model or an
+available effect summary from its package.
+This includes opaque calls during setup and cleanup, and function values
+returned by external factories. Formatting arguments with unmodeled methods
+also block suggestions because formatting may execute user-defined code.
+Unknown behavior is never treated as safe. Effects propagate back to callers,
 including through recursive helpers, and suppression is inherited by callees.
+Standard library dependencies use public API models; unmodeled operations remain
+opaque. Their internal implementations do not supply migration summaries.
 Unused closures and statically unreachable branches do not suppress suggestions.
 An interface with a statically known concrete receiver remains eligible. Function
 values in fields or containers that cannot be resolved are treated as unknown.
 Immutable function results are followed through local factories with one return
-site; external factories share the package-boundary limitation described below.
+site; results from external factories remain unknown.
 Clock reads propagate through synchronous local helpers. Clock-polling cycles
 without a guaranteed positive sleep are also withheld:
 a busy goroutine prevents virtual time from advancing. Conditional sleeps and
@@ -85,28 +122,88 @@ advancing. Unknown producers, producers implemented by helpers, and more complex
 protocols are skipped. A direct `t.Helper()` call does not prevent recognition.
 
 This analysis deliberately trades coverage for fewer misleading suggestions.
-Local helper summaries combine branches whose conditions are unknown; they do
-not specialize a helper for each argument or receiver value. Calls into other
-packages may still hide I/O from ST100's heuristic. Remaining sleep suggestions
-need review for bubble compatibility.
+General effect summaries combine branches whose conditions are unknown.
+Bounded decision summaries can specialize simple helpers using their actual
+arguments and receiver values. Calls into other
+packages without modeled behavior or usable summaries suppress suggestions.
+A missing diagnostic can therefore mean that the analysis lacks evidence,
+rather than that the
+test cannot be migrated. Remaining sleep suggestions need review for bubble
+compatibility.
 
-The former `suggest` and `check-misuse` options are replaced by `checks`.
-Use `-checks=ST001,ST002,ST003` instead of `-suggest=false`, or
-`-checks=ST100,ST101` instead of `-check-misuse=false`.
+### Explain withheld candidates
+
+For a migration audit, include explanations alongside the selected checks:
+
+```sh
+bubblelint -checks=ST100,ST101,ST102 -explain-migration ./...
+bubblelint -checks=ST102 -explain-migration -json ./...
+```
+
+The `migration` diagnostic category distinguishes two outcomes:
+
+| Outcome | Meaning |
+| --- | --- |
+| `migration blocked` | A required path contains an external dependency or an API incompatible with the proposed bubble, such as network I/O or `t.Parallel`. |
+| `migration unproven` | Analysis lacks evidence, for example an unresolved interface target, unmodeled callback, mutex progress, or clock-dependent assertions. |
+
+Each explanation includes a witness call chain. JSON output includes related
+source locations for the available evidence. Explanations never offer fixes;
+they also produce a nonzero exit status in the CLI's text mode. They currently
+cover a direct worker followed by a completion/readiness timeout or a sleep,
+and do not enumerate every possible migration boundary.
+
+Function summaries propagate through local and imported helpers using
+`go/analysis` facts. A timer-only helper can remain eligible across package
+boundaries, while a wrapper around network I/O retains that effect. Immutable
+interface values with known concrete receivers use the concrete method's
+summary. Decision summaries retain boolean and nil conditions, short-circuit
+expressions, early returns, and calls to known function or literal callbacks.
+They also follow fields of single-use local object literals and simple factory
+returns. Field writes, aliases, or escape invalidate that field knowledge.
+Callbacks registered through modeled APIs such as `t.Cleanup` retain their
+effects. Unsupported bodies and analysis work limits use the conservative
+effect summary; they never establish eligibility by dropping a path.
+
+For tests with local workers, an SSA refinement also follows fresh allocations,
+field aliases, concrete interface receivers, and public `sync/atomic` load/store
+contracts. A field has a known value only when it has no writes or one write
+that dominates the read, including writes completed before a worker starts.
+Escapes, multiple writes, and writes after worker launch leave the value unknown.
+This refinement does not simulate scheduling or unroll loops. Callback
+registrations, unsupported aliases, and analysis limits retain the existing
+conservative summary. Related source locations record branches excluded by a
+known test-specific condition.
+
+Remaining effects on conditional paths are reported as unproven: a network path may be
+unreachable for particular arguments. Clearing a finalizer with
+`runtime.SetFinalizer(value, nil)` does not register an outside callback. Unknown
+calls remain unknown, and successful trial runs do not change that assessment.
+
+For golangci-lint, set `explain-migration: true` alongside `checks` in the
+custom linter settings to include the same audit diagnostics.
+The plugin includes evidence in each diagnostic's message so automatic fixes and
+exclusions apply to the whole issue.
+
+Related information also lists the possible `Test*` entry points for each
+diagnostic. One helper location can belong to several tests, and one test can
+have several locations. Diagnostic counts therefore do not count tests or
+runtime subtest invocations. Entry attribution follows the static call graph;
+it does not establish that each path executes for a particular argument.
 
 ## Automatic fixes
 
 Preview supported fixes without changing files:
 
 ```sh
-bubblelint -fix -diff ./...
+bubblelint -checks=all -fix -diff ./...
 ```
 
 Apply supported fixes, check for remaining findings, and run your tests:
 
 ```sh
-bubblelint -fix ./...
-bubblelint ./...
+bubblelint -checks=all -fix ./...
+bubblelint -checks=all ./...
 go test ./...
 ```
 
@@ -119,6 +216,8 @@ to local channels:
 - **ST100:** the test receives every result before checking assertions.
 - **ST101:** a two-case `select` waits for the final worker or a constant
   `time.After` timeout. The worker must be guaranteed to signal before the timeout.
+  A local worker may close its result channel as its final statement or with
+  `defer close(ch)` before a sequence of constant-duration sleeps.
 
 The fix adds the import and wraps the test body. Existing `Sleep` calls,
 `select` branches, timeout values, and assertions stay intact; time advances
@@ -126,7 +225,8 @@ virtually inside the test.
 
 Some tests with helpers, shared state, or more complex control flow can still
 receive ST100 suggestions without a fix. ST101 skips tests outside its verified
-protocol. Review the diff and run your tests after applying fixes.
+protocol. ST102 is review-only. Review the diff and run your tests after
+applying fixes.
 
 ## golangci-lint
 
@@ -158,7 +258,7 @@ linters:
       bubblelint:
         type: module
         settings:
-          checks: [all] # Optional: all checks run by default.
+          checks: [all] # Optional: also enable migration suggestions.
 ```
 
 Use the same rule names and exclusions in this list, such as

@@ -12,10 +12,11 @@ func TestChecks(t *testing.T) {
 		entries []string
 		want    checkSet
 	}{
-		{"default", nil, allChecks},
+		{"default", nil, misuseChecks},
 		{"empty", []string{}, 0},
 		{"all", []string{"all"}, allChecks},
 		{"one", []string{"ST003"}, checkST003},
+		{"review", []string{"ST102"}, checkST102},
 		{"multiple", []string{"ST001", "ST101"}, checkST001 | checkST101},
 		{"exclude", []string{"all", "-ST101"}, allChecks &^ checkST101},
 		{"re-enable", []string{"all", "-ST100", "ST100"}, allChecks},
@@ -91,7 +92,7 @@ func TestChecksHelp(t *testing.T) {
 	var output bytes.Buffer
 	a.Flags.SetOutput(&output)
 	a.Flags.PrintDefaults()
-	if got := output.String(); !strings.Contains(got, "-checks") || !strings.Contains(got, "default all") || strings.Contains(got, "panic") {
+	if got := output.String(); !strings.Contains(got, "-checks") || !strings.Contains(got, "default ST001,ST002,ST003") || strings.Contains(got, "panic") {
 		t.Fatalf("unexpected checks help: %s", got)
 	}
 	for _, removed := range []string{"suggest", "check-misuse"} {

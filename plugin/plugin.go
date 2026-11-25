@@ -2,6 +2,10 @@
 package plugin
 
 import (
+	"fmt"
+	"go/token"
+	"strings"
+
 	"github.com/golangci/plugin-module-register/register"
 	"github.com/rleungx/bubblelint"
 	"golang.org/x/tools/go/analysis"
@@ -13,7 +17,8 @@ func init() {
 
 // Settings is decoded strictly so misspelled settings fail configuration.
 type Settings struct {
-	Checks []string `json:"checks"`
+	Checks           []string `json:"checks"`
+	ExplainMigration bool     `json:"explain-migration"`
 }
 
 type plugin struct {
@@ -26,7 +31,7 @@ func New(raw any) (register.LinterPlugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := bubblelint.Options{Checks: settings.Checks}
+	options := bubblelint.Options{Checks: settings.Checks, ExplainMigration: settings.ExplainMigration}
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
@@ -34,7 +39,32 @@ func New(raw any) (register.LinterPlugin, error) {
 }
 
 func (p *plugin) BuildAnalyzers() ([]*analysis.Analyzer, error) {
-	return []*analysis.Analyzer{bubblelint.New(&p.options)}, nil
+	analyzer := bubblelint.New(&p.options)
+	run := analyzer.Run
+	analyzer.Run = func(pass *analysis.Pass) (any, error) {
+		wrapped := *pass
+		wrapped.Report = func(diagnostic analysis.Diagnostic) {
+			pass.Report(inlineRelatedInformation(pass.Fset, diagnostic))
+		}
+		return run(&wrapped)
+	}
+	return []*analysis.Analyzer{analyzer}, nil
+}
+
+// golangci-lint reports related information as separate issues. Keep evidence
+// with its diagnostic so exclusions and automatic fixes apply to it together.
+func inlineRelatedInformation(fset *token.FileSet, diagnostic analysis.Diagnostic) analysis.Diagnostic {
+	if len(diagnostic.Related) == 0 {
+		return diagnostic
+	}
+	var message strings.Builder
+	message.WriteString(diagnostic.Message)
+	for _, related := range diagnostic.Related {
+		fmt.Fprintf(&message, "\n%s: %s", fset.PositionFor(related.Pos, false), related.Message)
+	}
+	diagnostic.Message = message.String()
+	diagnostic.Related = nil
+	return diagnostic
 }
 
 func (*plugin) GetLoadMode() string {

@@ -80,7 +80,7 @@ func TestParallel(t *testing.T) {
 	t.Parallel()
 	done := make(chan struct{})
 	go func() { close(done) }()
-	time.Sleep(time.Second) // want "ST100:"
+	time.Sleep(time.Second)
 	<-done
 }
 
@@ -88,7 +88,7 @@ func TestDeadline(t *testing.T) {
 	_, _ = t.Deadline()
 	done := make(chan struct{})
 	go func() { close(done) }()
-	time.Sleep(time.Second) // want "ST100:"
+	time.Sleep(time.Second)
 	<-done
 }
 
@@ -104,7 +104,7 @@ func TestWallClock(t *testing.T) {
 	start := time.Now()
 	done := make(chan struct{})
 	go func() { close(done) }()
-	time.Sleep(time.Second) // want "ST100:"
+	time.Sleep(time.Second)
 	<-done
 	t.Log(start)
 }
@@ -112,7 +112,7 @@ func TestWallClock(t *testing.T) {
 func TestStringer(t *testing.T) {
 	done := make(chan struct{})
 	go func() { close(done) }()
-	time.Sleep(time.Second) // want "ST100:"
+	time.Sleep(time.Second)
 	<-done
 	t.Log(label(1))
 }

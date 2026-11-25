@@ -82,7 +82,7 @@ func TestTimeout(t *testing.T) {
 
 func (d autofixDriver) runMigration(t *testing.T, dir string, fix, migration bool, exclusions string) (string, string, int) {
 	t.Helper()
-	var checks []string
+	checks := []string{"all"}
 	if !migration {
 		checks = []string{"all", "-ST100", "-ST101"}
 	}

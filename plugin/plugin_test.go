@@ -1,12 +1,35 @@
 package plugin
 
 import (
+	"go/token"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/golangci/plugin-module-register/register"
 	"github.com/rleungx/bubblelint"
 	"golang.org/x/tools/go/analysis"
 )
+
+func TestPluginKeepsEvidenceWithDiagnostic(t *testing.T) {
+	fset := token.NewFileSet()
+	file := fset.AddFile("worker_test.go", -1, 100)
+	original := analysis.Diagnostic{
+		Pos: file.Pos(20), Category: "ST101", Message: "ST101: review this timeout",
+		Related:        []analysis.RelatedInformation{{Pos: file.Pos(5), Message: "test entry: TestWorker"}},
+		SuggestedFixes: []analysis.SuggestedFix{{Message: "Run in a bubble", TextEdits: []analysis.TextEdit{{Pos: file.Pos(20), End: file.Pos(21)}}}},
+	}
+	result := inlineRelatedInformation(fset, original)
+	if len(result.Related) != 0 || !strings.Contains(result.Message, "worker_test.go:1:6: test entry: TestWorker") {
+		t.Fatalf("evidence was lost or left as a separate issue: %+v", result)
+	}
+	if result.Pos != original.Pos || result.Category != original.Category || !reflect.DeepEqual(result.SuggestedFixes, original.SuggestedFixes) {
+		t.Fatalf("diagnostic identity or fixes changed: %+v", result)
+	}
+	if len(original.Related) != 1 || original.Message != "ST101: review this timeout" {
+		t.Fatal("the adapter modified its input")
+	}
+}
 
 func TestPlugin(t *testing.T) {
 	constructor, err := register.GetPlugin("bubblelint")
@@ -107,6 +130,23 @@ func TestPluginAnalyzersAreIndependent(t *testing.T) {
 		if got := a.Flags.Lookup("checks").Value.String(); got != "ST003" {
 			t.Errorf("another analyzer or the input slice changed checks to %q", got)
 		}
+	}
+}
+
+func TestPluginMigrationExplanations(t *testing.T) {
+	p, err := New(map[string]any{"checks": []string{"ST102"}, "explain-migration": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := buildAnalyzer(t, p), buildAnalyzer(t, p)
+	if first.Flags.Lookup("explain-migration").Value.String() != "true" {
+		t.Fatal("plugin did not enable migration explanations")
+	}
+	if err := first.Flags.Set("explain-migration", "false"); err != nil {
+		t.Fatal(err)
+	}
+	if second.Flags.Lookup("explain-migration").Value.String() != "true" {
+		t.Fatal("analyzers share migration explanation settings")
 	}
 }
 

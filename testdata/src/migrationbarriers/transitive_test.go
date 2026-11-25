@@ -30,11 +30,16 @@ func cycleB(stop bool) { cycleA(stop) }
 
 func TestRecursiveNetworkA(t *testing.T) {
 	go cycleA(true)
-	time.Sleep(time.Second)
+	time.Sleep(time.Second) // want "ST100:"
 }
 
 func TestRecursiveNetworkB(t *testing.T) {
 	go cycleB(true)
+	time.Sleep(time.Second) // want "ST100:"
+}
+
+func TestRecursiveNetworkActive(t *testing.T) {
+	go cycleA(false)
 	time.Sleep(time.Second)
 }
 
