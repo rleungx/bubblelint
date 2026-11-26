@@ -164,16 +164,25 @@ returns. Field writes, aliases, or escape invalidate that field knowledge.
 Callbacks registered through modeled APIs such as `t.Cleanup` retain their
 effects. Unsupported bodies and analysis work limits use the conservative
 effect summary; they never establish eligibility by dropping a path.
+Generated functions supply the same effect and decision summaries as handwritten
+code, while diagnostics in generated files remain suppressed.
 
 For tests with local workers, an SSA refinement also follows fresh allocations,
 field aliases, concrete interface receivers, and public `sync/atomic` load/store
 contracts. A field has a known value only when it has no writes or one write
 that dominates the read, including writes completed before a worker starts.
 Escapes, multiple writes, and writes after worker launch leave the value unknown.
-This refinement does not simulate scheduling or unroll loops. Callback
-registrations, unsupported aliases, and analysis limits retain the existing
-conservative summary. Related source locations record branches excluded by a
-known test-specific condition.
+This refinement does not simulate scheduling or unroll loops. Recursive call
+edges and call-context limits invalidate the callee's inputs and retain its
+conservative effects. Loops and unmodeled callback registrations retain their
+caller's summary without discarding independent state proofs elsewhere in the
+test. Related source locations record excluded branches and explain when a
+function summary or an analysis work limit prevented refinement.
+
+When refining a test, inline subtests are analyzed as separate proposed bubbles. Their parent
+captures remain unknown: an object, channel, or `testing.T.Context` from the
+parent cannot establish ownership inside the subtest's bubble. Suggestions for
+a subtest concern its callback body, leaving the outer `t.Run` outside the bubble.
 
 Remaining effects on conditional paths are reported as unproven: a network path may be
 unreachable for particular arguments. Clearing a finalizer with

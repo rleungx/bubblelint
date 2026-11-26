@@ -45,3 +45,11 @@ func (Remote) Wait() {
 func NewSleeper() Sleeper {
 	return Local{}
 }
+
+func RunGenerated(options *GeneratedOptions) {
+	if options.GetRemote() {
+		Fetch()
+	} else {
+		Delay()
+	}
+}

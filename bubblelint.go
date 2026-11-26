@@ -105,6 +105,7 @@ type checker struct {
 	programBuilding   map[*ast.BlockStmt]bool
 	objectReferences  map[ast.Expr]int
 	contextProofs     map[*ast.BlockStmt][]migrationSSAProof
+	contextNotes      map[*ast.BlockStmt][]analysis.RelatedInformation
 }
 
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
@@ -122,7 +123,7 @@ func newChecker(pass *analysis.Pass, checks checkSet) *checker {
 
 func (c *checker) collect(includeProduction bool) {
 	for _, file := range c.pass.Files {
-		if ast.IsGenerated(file) {
+		if ast.IsGenerated(file) && !includeProduction {
 			continue
 		}
 		for _, decl := range file.Decls {
@@ -130,7 +131,7 @@ func (c *checker) collect(includeProduction bool) {
 				obj, _ := c.pass.TypesInfo.Defs[n.Name].(*types.Func)
 				fn := function{n.Body, n.Type.Params}
 				c.functions[obj] = fn
-				if c.isTest(n, file) {
+				if !ast.IsGenerated(file) && c.isTest(n, file) {
 					c.roots = append(c.roots, fn)
 				}
 			}
@@ -157,7 +158,7 @@ func (c *checker) collect(includeProduction bool) {
 		}
 	}
 	for _, file := range c.pass.Files {
-		if ast.IsGenerated(file) {
+		if ast.IsGenerated(file) && !includeProduction {
 			continue
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
@@ -557,6 +558,13 @@ func (c *checker) call(call *ast.CallExpr, s *state) {
 				} else {
 					// Run creates an ordinary T in the caller's bubble.
 					callbackT = &testContext{bubble: s.bubble}
+					if callback, ok := c.callable(args[index]); ok {
+						if _, independent := c.contextProofs[callback.body]; independent && !c.reviewBarriers[callback.body] {
+							// Its SSA result describes a separate bubble boundary,
+							// with parent captures left unknown.
+							inner.suppressMigration = false
+						}
+					}
 				}
 				c.callback(args[index], inner, callbackT)
 			}

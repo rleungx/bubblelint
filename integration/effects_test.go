@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,10 +26,11 @@ func TestCLIMigrationEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	for from, to := range map[string]string{
-		"migrationeffects/effects_test.go":  "effects_test.go",
-		"migrationeffects/worker/worker.go": "worker/worker.go",
-		"migrationeffects/relay/relay.go":   "relay/relay.go",
-		"migrationexplain/explain_test.go":  "explain/explain_test.go",
+		"migrationeffects/effects_test.go":     "effects_test.go",
+		"migrationeffects/worker/worker.go":    "worker/worker.go",
+		"migrationeffects/worker/generated.go": "worker/generated.go",
+		"migrationeffects/relay/relay.go":      "relay/relay.go",
+		"migrationexplain/explain_test.go":     "explain/explain_test.go",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, "testdata", "src", from))
 		if err != nil {
@@ -43,8 +45,12 @@ func TestCLIMigrationEffects(t *testing.T) {
 		}
 	}
 	stdout, stderr, exit := runCommand(t, module, *cliBinary, "-checks=ST102", ".")
-	if exit != 3 || strings.Count(stdout+stderr, "ST102:") != 4 || strings.Contains(stdout+stderr, "migration blocked:") {
-		t.Fatalf("cross-package summaries did not preserve the four local timer candidates: exit=%d\n%s%s", exit, stdout, stderr)
+	if exit != 3 || strings.Count(stdout+stderr, "ST102:") != 5 || strings.Contains(stdout+stderr, "migration blocked:") {
+		t.Fatalf("cross-package summaries did not preserve the five local timer candidates: exit=%d\n%s%s", exit, stdout, stderr)
+	}
+	stdout, stderr, exit = runCommand(t, module, *cliBinary, "-checks=ST102", "-explain-migration", ".")
+	if exit != 3 || !strings.Contains(stdout+stderr, "migrationeffects/worker.GeneratedFetch -> migrationeffects/worker.Fetch -> net.Dial") {
+		t.Fatalf("generated code lost its network effects: exit=%d\n%s%s", exit, stdout, stderr)
 	}
 	stdout, stderr, exit = runCommand(t, module, *cliBinary, "-checks=ST102", "./explain")
 	if exit != 0 || stdout+stderr != "" {
@@ -79,6 +85,7 @@ func TestCLIMigrationEffects(t *testing.T) {
 	if count != 5 {
 		t.Fatalf("got %d migration explanations, want 5", count)
 	}
+	runProposedMigrations(t, module, "effects_test.go", []string{"TestGeneratedGetter"})
 }
 
 func TestCLIMigrationContext(t *testing.T) {
@@ -192,10 +199,10 @@ func TestCLIMigrationSSA(t *testing.T) {
 			}
 		}
 	}
-	if counts["ST102"] != 2 || counts["blocked"] != 4 || counts["unproven"] != 7 || !proof {
+	if counts["ST102"] != 3 || counts["blocked"] != 5 || counts["unproven"] != 16 || !proof {
 		t.Fatalf("incorrect SSA assessments: %v, branch evidence=%v\n%s", counts, proof, stdout)
 	}
-	runProposedMigrations(t, module, "state_test.go", []string{"TestZeroAtomic", "TestConcreteInterface"})
+	runProposedMigrations(t, module, "state_test.go", []string{"TestZeroAtomic", "TestConcreteInterface", "TestFreshSubtest/local"})
 }
 
 func TestCLIMigrationProtocol(t *testing.T) {
@@ -230,21 +237,51 @@ func runProposedMigrations(t *testing.T, module, filename string, positive []str
 	}
 	astutil.AddImport(fset, file, "testing/synctest")
 	wrapped := 0
+	wrap := func(signature *ast.FuncType, body *ast.BlockStmt) *ast.BlockStmt {
+		return &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: &ast.CallExpr{
+			Fun:  &ast.SelectorExpr{X: ast.NewIdent("synctest"), Sel: ast.NewIdent("Test")},
+			Args: []ast.Expr{ast.NewIdent("t"), &ast.FuncLit{Type: signature, Body: body}},
+		}}}}
+	}
+	var testNames []string
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
 		if !ok {
 			continue
 		}
 		for _, name := range positive {
-			if fn.Name.Name != name {
+			parent, subtest, nested := strings.Cut(name, "/")
+			if fn.Name.Name != parent {
 				continue
 			}
-			body := fn.Body
-			fn.Body = &ast.BlockStmt{List: []ast.Stmt{&ast.ExprStmt{X: &ast.CallExpr{
-				Fun:  &ast.SelectorExpr{X: ast.NewIdent("synctest"), Sel: ast.NewIdent("Test")},
-				Args: []ast.Expr{ast.NewIdent("t"), &ast.FuncLit{Type: fn.Type, Body: body}},
-			}}}}
-			wrapped++
+			testNames = append(testNames, parent)
+			if !nested {
+				fn.Body = wrap(fn.Type, fn.Body)
+				wrapped++
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || len(call.Args) != 2 {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "Run" {
+					return true
+				}
+				literal, ok := call.Args[0].(*ast.BasicLit)
+				if !ok || literal.Kind != token.STRING {
+					return true
+				}
+				label, err := strconv.Unquote(literal.Value)
+				callback, ok := call.Args[1].(*ast.FuncLit)
+				if err == nil && ok && label == subtest {
+					callback.Body = wrap(callback.Type, callback.Body)
+					wrapped++
+					return false
+				}
+				return true
+			})
 		}
 	}
 	if wrapped != len(positive) {
@@ -257,7 +294,7 @@ func runProposedMigrations(t *testing.T, module, filename string, positive []str
 	if err := os.WriteFile(target, source.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pattern := "^(" + strings.Join(positive, "|") + ")$"
+	pattern := "^(" + strings.Join(testNames, "|") + ")$"
 	for _, args := range [][]string{{"test", ".", "-run", pattern, "-count=25"}, {"test", "-race", ".", "-run", pattern, "-count=5"}} {
 		stdout, stderr, exit := runCommand(t, module, "go", args...)
 		if exit != 0 {

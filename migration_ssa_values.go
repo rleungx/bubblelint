@@ -24,6 +24,7 @@ type migrationSSAValue struct {
 	choices                              []migrationSSAValue
 	ownedChannel                         bool
 	contextKnown, contextHasDone, cancel bool
+	bubbleTestingT                       bool
 }
 
 type migrationSSAObject struct {
@@ -109,17 +110,31 @@ type migrationSSAQuery struct {
 	value   ssa.Value
 }
 
-func (c *migrationSSAContext) value(v ssa.Value, at ssa.Instruction, seen map[migrationSSAQuery]bool) migrationSSAValue {
-	if v == nil || !c.machine.spend() {
+func (c *migrationSSAContext) value(v ssa.Value, at ssa.Instruction, seen map[migrationSSAQuery]bool) (result migrationSSAValue) {
+	if v == nil {
 		return migrationSSAValue{}
 	}
 	key := migrationSSAQuery{c, v}
+	if address, ok := c.machine.addresses[key]; ok {
+		return address
+	}
+	if !c.machine.spend() {
+		return migrationSSAValue{}
+	}
 	if seen[key] {
 		return migrationSSAValue{}
 	}
 	seen[key] = true
-	defer delete(seen, key)
-	result := migrationSSAValue{typ: v.Type()}
+	reads := c.machine.stateReads
+	defer func() {
+		delete(seen, key)
+		// Allocation addresses are immutable. Loads and control-dependent
+		// queries must be reevaluated as mutation and escape facts change.
+		if result.location != nil && reads == c.machine.stateReads && !c.machine.failed {
+			c.machine.addresses[key] = result
+		}
+	}()
+	result = migrationSSAValue{typ: v.Type()}
 	switch v := v.(type) {
 	case *ssa.Const:
 		result.constant = v.Value
@@ -129,6 +144,7 @@ func (c *migrationSSAContext) value(v ssa.Value, at ssa.Instruction, seen map[mi
 		if binding, ok := c.parameters[v]; ok {
 			return binding.value(seen)
 		}
+		result.bubbleTestingT = c.parent == nil && isTestingT(v.Type())
 	case *ssa.FreeVar:
 		if binding, ok := c.parameters[v]; ok {
 			return binding.value(seen)
@@ -143,6 +159,7 @@ func (c *migrationSSAContext) value(v ssa.Value, at ssa.Instruction, seen map[mi
 		result.nilKnown = true
 	case *ssa.FieldAddr:
 		base := c.value(v.X, at, seen)
+		result.bubbleTestingT = base.bubbleTestingT
 		result.location = base.location.field(v.Field, v.Type().Underlying().(*types.Pointer).Elem())
 		result.nilKnown = result.location != nil
 		if len(base.choices) > 0 {
@@ -271,6 +288,7 @@ func migrationSSABinary(op token.Token, a, b migrationSSAValue) migrationSSAValu
 // Select indices have a finite range. Dominating case comparisons exclude
 // impossible successors without simulating channel readiness or scheduling.
 func (c *migrationSSAContext) constrain(value ssa.Value, choices []migrationSSAValue, block *ssa.BasicBlock) []migrationSSAValue {
+	c.machine.stateReads++
 	for _, predecessor := range c.function.Blocks {
 		if predecessor == block || !predecessor.Dominates(block) {
 			continue

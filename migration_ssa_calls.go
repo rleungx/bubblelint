@@ -95,7 +95,7 @@ func (c *migrationSSAContext) standardValue(call ssa.CallInstruction, seen map[m
 		receiver := c.value(common.Args[0], call, seen)
 		return c.machine.read(receiver.location, c, call, fn.Type().(*types.Signature).Results().At(0).Type(), true, seen), true
 	}
-	if path == "testing" && name == "Context" {
+	if path == "testing" && name == "Context" && len(common.Args) == 1 && c.value(common.Args[0], call, seen).bubbleTestingT {
 		return migrationSSAValue{contextKnown: true, contextHasDone: true}, true
 	}
 	if path == "context" {
@@ -167,6 +167,17 @@ func (c *migrationSSAContext) reason(result *migrationSSAResult, kind migrationE
 	result.reasons.add(migrationReason{Kind: kind, Message: message, Trace: []migrationFrame{{Symbol: symbol, Position: c.machine.c.pass.Fset.PositionFor(pos, false)}}})
 }
 
+func (c *migrationSSAContext) summary() migrationSSAResult {
+	if body := migrationSSABody(c.function); body != nil {
+		if reasons, known := c.machine.base.reasons[body]; known {
+			return migrationSSAResult{reasons: reasons, timer: c.machine.base.timers[body]}
+		}
+	}
+	result := migrationSSAResult{reasons: make(migrationReasonSet)}
+	c.reason(&result, effectOpaqueCall, c.function.Pos(), c.function.String(), "the function has no usable effect summary")
+	return result
+}
+
 func (c *migrationSSAContext) fallback(call ssa.CallInstruction) migrationSSAResult {
 	result := migrationSSAResult{reasons: make(migrationReasonSet)}
 	fn := ssaCallObject(call.Common())
@@ -213,8 +224,9 @@ func (c *migrationSSAContext) callEffects(call ssa.CallInstruction) migrationSSA
 			if _, callback := arg.Type().Underlying().(*types.Signature); callback {
 				// Modeled external operations still need a callback lifetime
 				// contract before their object state can be refined.
-				c.machine.failed = true
-				return result
+				c.retainSummary = true
+				c.machine.notes[call.Pos()] = "callback lifetime is not modeled; its caller retains the conservative function summary"
+				return c.fallback(call)
 			}
 		}
 	}
@@ -240,6 +252,7 @@ func (c *migrationSSAContext) callEffects(call ssa.CallInstruction) migrationSSA
 		actual, _, _ := c.resolve(call, make(map[migrationSSAQuery]bool))
 		if actual != child.function {
 			c.machine.failed = true
+			c.machine.failure = "call resolution changed after mutation discovery"
 			return result
 		}
 		callee := child.analyze()
@@ -250,6 +263,9 @@ func (c *migrationSSAContext) callEffects(call ssa.CallInstruction) migrationSSA
 		}
 		result.timer = callee.timer
 		return result
+	}
+	if message := c.machine.cuts[call]; message != "" {
+		c.machine.notes[call.Pos()] = message
 	}
 	return c.fallback(call)
 }
@@ -374,7 +390,20 @@ func (c *migrationSSAContext) analyze() migrationSSAResult {
 	if migrationSSACycle(successors) {
 		// Loop progress and cooperative clock polling use the existing CFG
 		// analysis until this refinement can preserve those contracts.
-		c.machine.failed = true
+		c.retainSummary = true
+		c.machine.notes[c.function.Pos()] = "loop progress uses the conservative function summary"
+	}
+	if c.retainSummary {
+		summary := c.summary()
+		for _, reason := range summary.reasons {
+			result.reasons.add(reason)
+		}
+		result.timer = result.timer || summary.timer
+		for _, block := range c.function.Blocks {
+			if branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If); ok && branch.Cond.Pos().IsValid() {
+				c.machine.proofs[branch.Cond.Pos()] |= 1
+			}
+		}
 	}
 	c.result = &result
 	if body := migrationSSABody(c.function); body != nil {

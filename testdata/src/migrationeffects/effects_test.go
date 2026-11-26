@@ -88,3 +88,31 @@ func TestImportedCallback(t *testing.T) {
 		t.Fatal("worker did not finish")
 	}
 }
+
+func TestGeneratedGetter(t *testing.T) {
+	options := &worker.GeneratedOptions{Remote: false}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.RunGenerated(options)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST102:"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestGeneratedNetwork(t *testing.T) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		worker.Delay()
+		worker.GeneratedFetch()
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not finish")
+	}
+}

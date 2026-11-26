@@ -27,6 +27,10 @@ func (c *checker) findMigrationBarriers() {
 	var bodies []*ast.BlockStmt
 	add := func(body *ast.BlockStmt) {
 		if _, known := callers[body]; !known {
+			// An empty summary is distinct from a body never inspected.
+			if c.effects.reasons[body] == nil {
+				c.effects.reasons[body] = make(migrationReasonSet)
+			}
 			callers[body] = make(map[*ast.BlockStmt]bool)
 			clockCallers[body] = make(map[*ast.BlockStmt]bool)
 			bodies = append(bodies, body)

@@ -45,6 +45,7 @@ type migrationSSAContext struct {
 	children        map[ssa.CallInstruction]*migrationSSAContext
 	result          *migrationSSAResult
 	analyzing       bool
+	retainSummary   bool
 }
 
 type migrationSSAWrite struct {
@@ -68,16 +69,28 @@ type migrationSSAMachine struct {
 	escapes        []migrationSSAEscape
 	escaped        []*migrationSSALocation
 	proofs         map[token.Pos]uint8
+	notes          map[token.Pos]string
+	cuts           map[ssa.CallInstruction]string
+	failure        string
+	phase          string
 	results        map[*ast.BlockStmt]migrationSSAResult
 	calls          map[token.Pos]*ast.CallExpr
+	addresses      map[migrationSSAQuery]migrationSSAValue
+	stateReads     uint64
+	storeTypes     map[migrationSSAStoreTypes]bool
+	referenceTypes map[types.Type]bool
 	left           int
 	sealed, failed bool
 }
 
 func (m *migrationSSAMachine) spend() bool {
+	if m.failed {
+		return false
+	}
 	m.left--
 	if m.left < 0 {
 		m.failed = true
+		m.failure = m.phase + " work limit reached"
 	}
 	return !m.failed
 }
@@ -150,27 +163,90 @@ func (c *checker) refineMigrationContexts() {
 	base.timers = maps.Clone(c.effects.timers)
 	c.coarseEffects = &base
 	c.prepareMigrationPrograms()
-	sort.Slice(roots, func(i, j int) bool { return roots[i].Pos() < roots[j].Pos() })
+	var entries []*ssa.Function
+	byBody := make(map[*ast.BlockStmt]*ssa.Function)
+	var index func(*ssa.Function)
+	index = func(fn *ssa.Function) {
+		if fn == nil {
+			return
+		}
+		byBody[migrationSSABody(fn)] = fn
+		for _, child := range fn.AnonFuncs {
+			index(child)
+		}
+	}
 	for _, fn := range roots {
 		function := program.FuncValue(fn)
 		if function == nil {
 			continue
 		}
-		m := &migrationSSAMachine{c: c, program: program, base: &base, root: c.functions[fn].body, left: 16384, proofs: make(map[token.Pos]uint8), results: make(map[*ast.BlockStmt]migrationSSAResult), calls: make(map[token.Pos]*ast.CallExpr)}
-		for _, file := range c.pass.Files {
-			ast.Inspect(file, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok {
-					m.calls[call.Lparen] = call
-				}
+		entries = append(entries, function)
+		index(function)
+	}
+	calls := make(map[token.Pos]*ast.CallExpr)
+	seen := make(map[*ssa.Function]bool)
+	for _, entry := range entries {
+		seen[entry] = true
+	}
+	for _, file := range c.pass.Files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
 				return true
-			})
+			}
+			calls[call.Lparen] = call
+			fn, receiver, args := c.methodCall(call)
+			if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "testing" || fn.Name() != "Run" || receiver == nil || !isTestingT(c.pass.TypesInfo.TypeOf(receiver)) || len(args) != 2 {
+				return true
+			}
+			callback, ok := c.callable(args[1])
+			if !ok || !hasMigrationSSACandidate(callback.body) {
+				return true
+			}
+			if function := byBody[callback.body]; function != nil && !seen[function] {
+				// A subtest is a separate proposed bubble. Captures from its
+				// parent remain unknown, including channels created outside it.
+				entries = append(entries, function)
+				seen[function] = true
+			}
+			return true
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Pos() < entries[j].Pos() })
+	for _, function := range entries {
+		m := &migrationSSAMachine{
+			c: c, program: program, base: &base, root: migrationSSABody(function), left: 16384,
+			proofs: make(map[token.Pos]uint8), notes: make(map[token.Pos]string),
+			cuts:    make(map[ssa.CallInstruction]string),
+			results: make(map[*ast.BlockStmt]migrationSSAResult), calls: calls,
+			addresses: make(map[migrationSSAQuery]migrationSSAValue), storeTypes: make(map[migrationSSAStoreTypes]bool),
+			referenceTypes: make(map[types.Type]bool),
 		}
 		root := m.newContext(function, nil, nil, nil, nil)
+		m.phase = "mutation discovery"
 		m.discover(root)
-		m.sealed = true
-		m.findEscapes()
-		m.left = 16384
-		root.analyze()
+		if !m.failed {
+			m.sealed = true
+			m.phase = "escape analysis"
+			m.findEscapes()
+		}
+		if !m.failed {
+			m.left = 16384
+			m.phase = "branch refinement"
+			root.analyze()
+		}
+		if c.contextNotes == nil {
+			c.contextNotes = make(map[*ast.BlockStmt][]analysis.RelatedInformation)
+		}
+		if m.failed {
+			m.notes[m.root.Pos()] = "test-specific analysis stopped: " + m.failure + "; conservative function summaries are retained"
+		}
+		for pos, message := range m.notes {
+			if pos.IsValid() {
+				c.contextNotes[m.root] = append(c.contextNotes[m.root], analysis.RelatedInformation{Pos: pos, Message: message})
+			}
+		}
+		sort.Slice(c.contextNotes[m.root], func(i, j int) bool { return c.contextNotes[m.root][i].Pos < c.contextNotes[m.root][j].Pos })
 		if m.failed {
 			continue
 		}
@@ -203,23 +279,31 @@ func (c *checker) refineMigrationContexts() {
 
 func (c *checker) migrationContextInformation(node ast.Node) []analysis.RelatedInformation {
 	var related []analysis.RelatedInformation
-	for body, proofs := range c.contextProofs {
-		if node.Pos() >= body.Pos() && node.End() <= body.End() {
-			for _, proof := range proofs {
-				value := "false"
-				if proof.value {
-					value = "true"
-				}
-				related = append(related, analysis.RelatedInformation{Pos: proof.pos, Message: "test-specific branch condition is " + value + "; the other branch is excluded"})
-			}
+	var boundary *ast.BlockStmt
+	consider := func(body *ast.BlockStmt) {
+		if node.Pos() >= body.Pos() && node.End() <= body.End() && (boundary == nil || body.End()-body.Pos() < boundary.End()-boundary.Pos()) {
+			boundary = body
 		}
 	}
+	for body := range c.contextProofs {
+		consider(body)
+	}
+	for body := range c.contextNotes {
+		consider(body)
+	}
+	for _, proof := range c.contextProofs[boundary] {
+		value := "false"
+		if proof.value {
+			value = "true"
+		}
+		related = append(related, analysis.RelatedInformation{Pos: proof.pos, Message: "test-specific branch condition is " + value + "; the other branch is excluded"})
+	}
+	related = append(related, c.contextNotes[boundary]...)
 	return related
 }
 
 func (m *migrationSSAMachine) newContext(fn *ssa.Function, parent *migrationSSAContext, site ssa.CallInstruction, args []migrationSSABinding, free []migrationSSABinding) *migrationSSAContext {
 	if len(m.contexts) >= 128 {
-		m.failed = true
 		return nil
 	}
 	c := &migrationSSAContext{machine: m, function: fn, parent: parent, site: site, parameters: make(map[ssa.Value]migrationSSABinding), objects: make(map[*ssa.Alloc]*migrationSSAObject), children: make(map[ssa.CallInstruction]*migrationSSAContext)}
@@ -306,6 +390,12 @@ func (m *migrationSSAMachine) discover(c *migrationSSAContext) {
 				m.escapes = append(m.escapes, migrationSSAEscape{c, call, call.Common().Args[0]})
 			}
 			if atomicMethod(call.Common()) != "" || c.modeled(call) {
+				// A public API model does not describe callback writes or lifetime.
+				for _, arg := range call.Common().Args {
+					if _, callback := arg.Type().Underlying().(*types.Signature); callback {
+						m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
+					}
+				}
 				continue
 			}
 			fn, args, free := c.resolve(call, make(map[migrationSSAQuery]bool))
@@ -318,26 +408,40 @@ func (m *migrationSSAMachine) discover(c *migrationSSAContext) {
 					}
 				}
 				if recursive {
-					// A partial recursive call graph cannot inventory every write.
-					m.failed = true
-					return
+					// Keep the callee's conservative effects and invalidate its
+					// inputs instead of discarding unrelated object state.
+					m.escapeCall(c, call, free)
+					m.cuts[call] = "recursive call retains its conservative function summary; its inputs may be modified"
+					continue
 				}
 				child := m.newContext(fn, c, call, args, free)
+				if child == nil {
+					m.escapeCall(c, call, free)
+					m.cuts[call] = "call-context limit reached; this call retains its conservative function summary"
+					continue
+				}
 				c.children[call] = child
 				m.discover(child)
 			} else {
-				for _, arg := range call.Common().Args {
-					m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
-				}
-				if call.Common().IsInvoke() {
-					m.escapes = append(m.escapes, migrationSSAEscape{c, call, call.Common().Value})
-				}
+				m.escapeCall(c, call, free)
 			}
 		}
 	}
 }
 
+func (m *migrationSSAMachine) escapeCall(c *migrationSSAContext, call ssa.CallInstruction, free []migrationSSABinding) {
+	for _, arg := range call.Common().Args {
+		m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
+	}
+	// Function values include closure captures; interface values include receivers.
+	m.escapes = append(m.escapes, migrationSSAEscape{c, call, call.Common().Value})
+	for _, binding := range free {
+		m.escapes = append(m.escapes, migrationSSAEscape{binding.context, binding.at, binding.expression})
+	}
+}
+
 func (m *migrationSSAMachine) read(location *migrationSSALocation, c *migrationSSAContext, at ssa.Instruction, typ types.Type, atomic bool, seen map[migrationSSAQuery]bool) migrationSSAValue {
+	m.stateReads++
 	if location == nil {
 		return migrationSSAValue{}
 	}
@@ -348,6 +452,10 @@ func (m *migrationSSAMachine) read(location *migrationSSALocation, c *migrationS
 	}
 	var matching []migrationSSAWrite
 	for _, write := range m.writes {
+		pointer, ok := write.address.Type().Underlying().(*types.Pointer)
+		if !ok || !m.storeMayAffect(pointer.Elem(), location.typ) {
+			continue
+		}
 		address := write.context.value(write.address, write.site, seen).location
 		if address == nil {
 			continue
@@ -369,6 +477,53 @@ func (m *migrationSSAMachine) read(location *migrationSSALocation, c *migrationS
 	}
 	write := matching[0]
 	return write.context.value(write.value, write.site, seen)
+}
+
+type migrationSSAStoreTypes struct{ stored, read types.Type }
+
+// An aggregate store may overwrite a field or array element. Other stores need
+// compatible element types before their addresses can refer to the queried cell.
+// Pointer conversions can change a cell's named type or struct tags.
+func (m *migrationSSAMachine) storeMayAffect(stored, read types.Type) bool {
+	key := migrationSSAStoreTypes{stored, read}
+	if value, known := m.storeTypes[key]; known {
+		return value
+	}
+	value := types.IdenticalIgnoreTags(stored.Underlying(), read.Underlying())
+	if !value {
+		switch t := stored.Underlying().(type) {
+		case *types.Struct:
+			for i := 0; i < t.NumFields() && !value; i++ {
+				value = m.storeMayAffect(t.Field(i).Type(), read)
+			}
+		case *types.Array:
+			value = m.storeMayAffect(t.Elem(), read)
+		}
+	}
+	m.storeTypes[key] = value
+	return value
+}
+
+// Scalar arguments and stores cannot carry aliases to mutable program objects.
+// Pointer-free aggregates have the same property; closures and interfaces do not.
+func (m *migrationSSAMachine) mayCarryReference(t types.Type) bool {
+	if value, known := m.referenceTypes[t]; known {
+		return value
+	}
+	value := true
+	switch t := t.Underlying().(type) {
+	case *types.Basic:
+		value = t.Kind() == types.UnsafePointer
+	case *types.Struct:
+		value = false
+		for i := 0; i < t.NumFields() && !value; i++ {
+			value = m.mayCarryReference(t.Field(i).Type())
+		}
+	case *types.Array:
+		value = m.mayCarryReference(t.Elem())
+	}
+	m.referenceTypes[t] = value
+	return value
 }
 
 func instructionDominates(a, b ssa.Instruction) bool {
@@ -461,6 +616,9 @@ func (m *migrationSSAMachine) findEscapes() {
 		return result
 	}
 	for _, escape := range m.escapes {
+		if !m.mayCarryReference(escape.expression.Type()) {
+			continue
+		}
 		for _, location := range locations(escape.context.value(escape.expression, escape.site, make(map[migrationSSAQuery]bool))) {
 			add(location)
 		}
@@ -468,6 +626,9 @@ func (m *migrationSSAMachine) findEscapes() {
 	for changed := true; changed && !m.failed; {
 		changed = false
 		for _, write := range m.writes {
+			if !m.mayCarryReference(write.value.Type()) {
+				continue
+			}
 			if !m.spend() {
 				return
 			}
