@@ -6,10 +6,14 @@ import (
 )
 
 type migrationValue struct {
-	kind   byte
-	text   string
-	target *migrationTarget
-	fields map[string]migrationValue
+	kind     byte
+	text     string
+	target   *migrationTarget
+	fields   map[string]migrationValue
+	typ      types.Type
+	tuple    []migrationValue
+	boxed    bool
+	concrete bool
 }
 
 func invalidateMigrationFields(value migrationValue) {
@@ -20,13 +24,15 @@ func invalidateMigrationFields(value migrationValue) {
 }
 
 type migrationEvaluation struct {
-	inputs      map[int]migrationValue
-	reasons     migrationReasonSet
-	timer       bool
-	conditional bool
-	left        *int
-	frame       migrationFrame
-	mayReturn   bool
+	c             *checker
+	inputs        map[int]migrationValue
+	reasons       migrationReasonSet
+	timer         bool
+	conditional   bool
+	left          *int
+	frame         migrationFrame
+	mayReturn     bool
+	partialReturn bool
 }
 
 func (s *migrationEvaluation) reason(reason migrationReason) {
@@ -34,7 +40,7 @@ func (s *migrationEvaluation) reason(reason migrationReason) {
 	s.reasons.add(reason)
 }
 
-func (s *migrationEvaluation) expression(expr *migrationExpression) migrationValue {
+func (s *migrationEvaluation) expression(expr *migrationExpression) (result migrationValue) {
 	*s.left--
 	if *s.left < 0 {
 		s.reason(migrationReason{Kind: effectOpaqueCall, Message: "context analysis exceeded its work limit", Trace: []migrationFrame{s.frame}})
@@ -43,6 +49,13 @@ func (s *migrationEvaluation) expression(expr *migrationExpression) migrationVal
 	if expr == nil {
 		return migrationValue{}
 	}
+	defer func() {
+		if expr.Concrete && s.c != nil {
+			result.typ = s.c.migrationTypes.resolve(expr.Type)
+			result.concrete = true
+		}
+		result.boxed = expr.Box
+	}()
 	switch expr.Kind {
 	case 'b', 'n':
 		return migrationValue{kind: expr.Kind, text: expr.Text}
@@ -59,6 +72,39 @@ func (s *migrationEvaluation) expression(expr *migrationExpression) migrationVal
 	case 'f':
 		value := s.expression(expr.Left)
 		return value.fields[expr.Text]
+	case '@':
+		value := s.expression(expr.Left)
+		if value.kind == 'o' {
+			return value
+		}
+	case 'a':
+		value := s.expression(expr.Left)
+		result.tuple = []migrationValue{{}, {}}
+		if s.c == nil {
+			return result
+		}
+		want := s.c.migrationTypes.resolve(expr.Assert)
+		if want == nil {
+			return result
+		}
+		known, matches := false, false
+		if value.typ != nil {
+			known = true
+			if iface, ok := want.Underlying().(*types.Interface); ok {
+				matches = types.Implements(value.typ, iface)
+			} else {
+				matches = types.Identical(value.typ, want)
+			}
+		} else if value.kind == 'n' && !value.concrete {
+			known = true
+		}
+		if known {
+			result.tuple[1] = migrationValue{kind: 'b', text: boolText(matches)}
+			if matches {
+				result.tuple[0] = value
+			}
+		}
+		return result
 	case '!':
 		value := s.expression(expr.Left)
 		if value.kind == 'b' {
@@ -83,10 +129,18 @@ func (s *migrationEvaluation) expression(expr *migrationExpression) migrationVal
 		}
 		known, equal := false, false
 		if left.kind == 'b' && right.kind == 'b' {
-			known, equal = true, left.text == right.text
+			if !left.boxed && !right.boxed {
+				known, equal = true, left.text == right.text
+			} else if left.typ != nil && right.typ != nil {
+				known, equal = true, types.Identical(left.typ, right.typ) && left.text == right.text
+			}
 		}
-		if left.kind == 'n' && right.kind == 'n' {
+		leftBox, rightBox := left.boxed && left.concrete, right.boxed && right.concrete
+		if left.kind == 'n' && right.kind == 'n' && !leftBox && !rightBox {
 			known, equal = true, true
+		}
+		if leftBox && right.kind == 'n' && !right.concrete || rightBox && left.kind == 'n' && !left.concrete {
+			known, equal = true, false
 		}
 		if left.kind == 'o' && right.kind == 'n' || right.kind == 'o' && left.kind == 'n' {
 			known, equal = true, false
@@ -104,6 +158,11 @@ func (s *migrationEvaluation) expression(expr *migrationExpression) migrationVal
 			return migrationValue{}
 		}
 		target, receiver := expr.Target, callee
+		if expr.Method != "" && s.c != nil && receiver.typ != nil {
+			if resolved := s.methodTarget(expr, receiver); resolved != nil {
+				target = resolved
+			}
+		}
 		if target == nil && callee.kind == 'v' {
 			target, receiver = callee.target, migrationValue{}
 		}
@@ -131,6 +190,20 @@ func (s *migrationEvaluation) statements(steps []migrationInstruction) (migratio
 	for _, step := range steps {
 		value := s.expression(step.Expr)
 		switch step.Kind {
+		case 'a':
+			for i, slot := range step.Slots {
+				if slot >= 0 {
+					continue
+				}
+				binding := value
+				if len(step.Slots) > 1 {
+					binding = migrationValue{}
+					if i < len(value.tuple) {
+						binding = value.tuple[i]
+					}
+				}
+				s.inputs[slot] = binding
+			}
 		case 'r':
 			s.mayReturn = true
 			return value, true
@@ -155,9 +228,12 @@ func (s *migrationEvaluation) statements(steps []migrationInstruction) (migratio
 				elseValue, elseReturns := elseState.statements(step.Else)
 				s.timer = s.timer || thenState.timer || elseState.timer
 				s.mayReturn = s.mayReturn || thenState.mayReturn || elseState.mayReturn
+				s.partialReturn = s.partialReturn || thenState.partialReturn || elseState.partialReturn ||
+					(thenState.mayReturn || elseState.mayReturn) && !(thenReturns && elseReturns)
 				s.conditional = previous || thenReturns != elseReturns || thenState.mayReturn && !thenReturns || elseState.mayReturn && !elseReturns
 				if thenReturns && elseReturns {
-					if thenValue.kind == elseValue.kind && thenValue.text == elseValue.text && (thenValue.kind == 'b' || thenValue.kind == 'n') {
+					sameType := !thenValue.concrete && !elseValue.concrete || thenValue.typ != nil && elseValue.typ != nil && types.Identical(thenValue.typ, elseValue.typ)
+					if sameType && thenValue.boxed == elseValue.boxed && thenValue.kind == elseValue.kind && thenValue.text == elseValue.text && (thenValue.kind == 'b' || thenValue.kind == 'n') {
 						return thenValue, true
 					}
 					return migrationValue{}, true
@@ -169,6 +245,18 @@ func (s *migrationEvaluation) statements(steps []migrationInstruction) (migratio
 }
 
 func (s *migrationEvaluation) invoke(target *migrationTarget, receiver migrationValue, args []migrationValue) migrationValue {
+	if target.Formatting {
+		for _, arg := range args {
+			basic := false
+			if arg.typ != nil {
+				_, basic = arg.typ.Underlying().(*types.Basic)
+			}
+			if !basic || s.c == nil || s.c.migrationTypes.methods.MethodSet(arg.typ).Len() != 0 {
+				s.reason(migrationReason{Kind: effectFormatting, Message: "formatting may invoke an unmodeled String or Error method", Trace: []migrationFrame{target.Frame}})
+				break
+			}
+		}
+	}
 	if target.Program == nil || *s.left <= 0 {
 		for _, reason := range target.Reasons {
 			reason.Trace = append([]migrationFrame{target.Frame}, reason.Trace...)
@@ -200,8 +288,12 @@ func (s *migrationEvaluation) invoke(target *migrationTarget, receiver migration
 	for i, arg := range args {
 		inputs[i] = arg
 	}
-	child := migrationEvaluation{inputs: inputs, reasons: make(migrationReasonSet), left: s.left, frame: target.Frame}
+	child := migrationEvaluation{c: s.c, inputs: inputs, reasons: make(migrationReasonSet), left: s.left, frame: target.Frame}
 	value, _ := child.statements(target.Program.Steps)
+	if child.partialReturn {
+		// The final return does not describe paths that returned earlier.
+		value = migrationValue{}
+	}
 	s.timer = s.timer || child.timer
 	for _, reason := range child.reasons.ordered() {
 		reason.Trace = append([]migrationFrame{target.Frame}, reason.Trace...)
@@ -221,7 +313,7 @@ func (c *checker) specializeMigrationCall(body *ast.BlockStmt, call *ast.CallExp
 		return false, false
 	}
 	work := 256
-	evaluation := migrationEvaluation{inputs: make(map[int]migrationValue), reasons: make(migrationReasonSet), left: &work, frame: expr.Target.Frame}
+	evaluation := migrationEvaluation{c: c, inputs: make(map[int]migrationValue), reasons: make(migrationReasonSet), left: &work, frame: expr.Target.Frame}
 	evaluation.expression(expr)
 	if c.effects.reasons[body] == nil {
 		c.effects.reasons[body] = make(migrationReasonSet)
@@ -236,4 +328,31 @@ func (c *checker) specializeMigrationCall(body *ast.BlockStmt, call *ast.CallExp
 		c.effects.timers[body] = c.effects.timers[body] || evaluation.timer
 	}
 	return true, clock
+}
+
+func (s *migrationEvaluation) methodTarget(expr *migrationExpression, receiver migrationValue) *migrationTarget {
+	pkg := s.c.migrationTypes.pkg(expr.MethodPackage)
+	if expr.MethodPackage != "" && pkg == nil {
+		return nil
+	}
+	selection := s.c.migrationTypes.methods.MethodSet(receiver.typ).Lookup(pkg, expr.Method)
+	if selection == nil {
+		return nil
+	}
+	fn := selection.Obj().(*types.Func)
+	if len(selection.Index()) != 1 && !knownMigrationCall(fn) {
+		// Public operation models do not use receiver fields. Other promoted
+		// methods need the receiver adjustments supplied by the SSA refinement.
+		return nil
+	}
+	budget := 128
+	builder := migrationProgramBuilder{c: s.c, inputs: make(map[types.Object]int), left: &budget}
+	target := builder.target(fn, ast.NewIdent(fn.Name()), nil)
+	if expr.Target != nil {
+		target.Frame.Position = expr.Target.Frame.Position
+	}
+	if receiver.kind == 'n' {
+		s.reason(migrationReason{Kind: effectOpaqueCall, Message: "the concrete interface receiver is nil and needs a call-safety review", Trace: []migrationFrame{target.Frame}})
+	}
+	return target
 }

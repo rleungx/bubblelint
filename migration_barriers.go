@@ -177,24 +177,31 @@ func (c *checker) knownMigrationInvocation(fn *types.Func, call *ast.CallExpr) b
 	if !knownMigrationCall(fn) {
 		return false
 	}
-	if fn.Pkg().Path() != "testing" {
+	if !migrationFormattingOperation(fn) {
 		return true
 	}
-	switch fn.Name() {
-	case "Error", "Errorf", "Fatal", "Fatalf", "Log", "Logf", "Skip", "Skipf":
-		args := call.Args
-		if method, _, methodArgs := c.methodCall(call); method != nil {
-			args = methodArgs
-		}
-		for _, arg := range args {
-			typ := c.pass.TypesInfo.TypeOf(arg)
-			if _, basic := typ.Underlying().(*types.Basic); !basic || types.NewMethodSet(typ).Len() != 0 {
-				// Formatting can invoke user-defined String or Error methods.
-				return false
-			}
+	args := call.Args
+	if method, _, methodArgs := c.methodCall(call); method != nil {
+		args = methodArgs
+	}
+	for _, arg := range args {
+		typ := c.pass.TypesInfo.TypeOf(arg)
+		if _, basic := typ.Underlying().(*types.Basic); !basic || types.NewMethodSet(typ).Len() != 0 {
+			// Formatting can invoke user-defined String or Error methods.
+			return false
 		}
 	}
 	return true
+}
+
+func migrationFormattingOperation(fn *types.Func) bool {
+	if fn.Pkg() != nil && fn.Pkg().Path() == "testing" {
+		switch fn.Name() {
+		case "Error", "Errorf", "Fatal", "Fatalf", "Log", "Logf", "Skip", "Skipf":
+			return true
+		}
+	}
+	return false
 }
 
 func markMigrationRecursion(barriers map[*ast.BlockStmt]bool, edges map[*ast.BlockStmt]map[*ast.BlockStmt]bool) {

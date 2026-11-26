@@ -122,6 +122,7 @@ func newMigrationEffectsAnalyzer(enabled func() bool) *analysis.Analyzer {
 				return (*migrationEffectsResult)(nil), nil
 			}
 			c := newChecker(pass, allChecks)
+			c.migrationFactOwner = true
 			c.collect(true)
 			if len(c.roots) == 0 && migrationStandardLibrarySource(pass) {
 				// Standard library dependencies use public operation models.
@@ -234,7 +235,7 @@ func (c *checker) cacheMigrationFact(fn *types.Func) *migrationFact {
 		return fact
 	}
 	var fact migrationFact
-	if c.pass.ImportObjectFact != nil && fn.Pkg() != nil && fn.Pkg() != c.pass.Pkg && c.pass.ImportObjectFact(fn, &fact) {
+	if c.migrationFactOwner && c.pass.ImportObjectFact != nil && fn.Pkg() != nil && fn.Pkg() != c.pass.Pkg && c.pass.ImportObjectFact(fn, &fact) {
 		c.effects.imported[fn] = &fact
 		return &fact
 	}

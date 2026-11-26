@@ -16,22 +16,29 @@ type migrationProgram struct {
 }
 
 type migrationInstruction struct {
-	Kind byte // e: expression, i: if, r: return
-	Expr *migrationExpression
-	Then []migrationInstruction
-	Else []migrationInstruction
+	Kind  byte // e: expression, i: if, r: return, a: immutable binding
+	Expr  *migrationExpression
+	Then  []migrationInstruction
+	Else  []migrationInstruction
+	Slots []int `json:",omitempty"`
 }
 
 type migrationExpression struct {
-	Kind    byte // ?: unknown, b: bool, n: nil, p: parameter, f: field, c: call, v: function, o: object, !/&/|/=/~: operators
-	Text    string
-	Input   int // -1 is the receiver
-	Left    *migrationExpression
-	Right   *migrationExpression
-	Args    []*migrationExpression
-	Target  *migrationTarget
-	Fields  []migrationProgramField
-	Discard bool
+	Kind          byte // ?: unknown, b: bool, n: nil, p: bound value, a: comma-ok type assertion, f: field, c: call, v: function, o: object, !/&/|/=/~/@: operators
+	Text          string
+	Input         int // -1 is the receiver
+	Left          *migrationExpression
+	Right         *migrationExpression
+	Args          []*migrationExpression
+	Target        *migrationTarget
+	Fields        []migrationProgramField
+	Discard       bool
+	Type          *migrationType `json:",omitempty"`
+	Assert        *migrationType `json:",omitempty"`
+	Method        string         `json:",omitempty"`
+	MethodPackage string         `json:",omitempty"`
+	Box           bool           `json:",omitempty"`
+	Concrete      bool           `json:",omitempty"`
 }
 
 type migrationProgramField struct {
@@ -46,6 +53,7 @@ type migrationTarget struct {
 	Timer            bool
 	Callbacks        []int
 	OptionalCallback bool
+	Formatting       bool `json:",omitempty"`
 }
 
 type migrationProgramBuilder struct {
@@ -64,6 +72,16 @@ func (c *checker) migrationProgram(fn *types.Func, body function, budget *int) *
 	}
 	if c.programBuilding[body.body] || *budget <= 0 {
 		return nil
+	}
+	if fn != nil {
+		sig := fn.Type().(*types.Signature)
+		if sig.TypeParams().Len() != 0 || sig.RecvTypeParams().Len() != 0 {
+			// Decision facts do not carry a type-argument environment. Keep
+			// the ordinary effect summary rather than interpreting constraints
+			// as the runtime types of parameter values.
+			c.programs[body.body] = nil
+			return nil
+		}
 	}
 	c.programBuilding[body.body] = true
 	defer delete(c.programBuilding, body.body)
@@ -117,9 +135,33 @@ func (b migrationProgramBuilder) statements(statements []ast.Stmt) ([]migrationI
 			continue
 		case *ast.ExprStmt:
 			op.Kind, op.Expr = 'e', b.expression(stmt.X)
+		case *ast.AssignStmt:
+			var ok bool
+			op, ok = b.binding(stmt.Lhs, stmt.Rhs)
+			if !ok {
+				return nil, false
+			}
+		case *ast.DeclStmt:
+			decl, ok := stmt.Decl.(*ast.GenDecl)
+			if !ok || decl.Tok != token.VAR || len(decl.Specs) != 1 {
+				return nil, false
+			}
+			spec := decl.Specs[0].(*ast.ValueSpec)
+			var lhs []ast.Expr
+			for _, name := range spec.Names {
+				lhs = append(lhs, name)
+			}
+			op, ok = b.binding(lhs, spec.Values)
+			if !ok {
+				return nil, false
+			}
 		case *ast.IfStmt:
 			if stmt.Init != nil {
-				return nil, false
+				initial, ok := b.statements([]ast.Stmt{stmt.Init})
+				if !ok {
+					return nil, false
+				}
+				result = append(result, initial...)
 			}
 			op.Kind, op.Expr = 'i', b.expression(stmt.Cond)
 			var ok bool
@@ -154,13 +196,80 @@ func (b migrationProgramBuilder) statements(statements []ast.Stmt) ([]migrationI
 	return result, true
 }
 
-func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression {
+func (b migrationProgramBuilder) binding(lhs, rhs []ast.Expr) (migrationInstruction, bool) {
+	op := migrationInstruction{Kind: 'a'}
+	if len(rhs) != 1 || len(lhs) == 0 || len(lhs) > 2 {
+		return op, false
+	}
+	if len(lhs) == 2 {
+		assertion, ok := ast.Unparen(rhs[0]).(*ast.TypeAssertExpr)
+		if !ok || assertion.Type == nil {
+			return op, false
+		}
+		want := describeMigrationType(b.c.pass.TypesInfo.TypeOf(assertion.Type), b.left)
+		if want == nil {
+			return op, false
+		}
+		op.Expr = &migrationExpression{Kind: 'a', Left: b.expression(assertion.X), Assert: want}
+	} else {
+		op.Expr = b.expression(rhs[0])
+	}
+	for _, expr := range lhs {
+		id, ok := expr.(*ast.Ident)
+		if !ok {
+			return op, false
+		}
+		obj := b.c.pass.TypesInfo.ObjectOf(id)
+		if id.Name == "_" {
+			op.Slots = append(op.Slots, 0)
+			continue
+		}
+		if obj == nil || b.c.assignments[obj] != 1 {
+			return op, false
+		}
+		if _, exists := b.inputs[obj]; exists {
+			return op, false
+		}
+		slot := -len(b.inputs) - 2
+		b.inputs[obj] = slot
+		op.Slots = append(op.Slots, slot)
+	}
+	return op, true
+}
+
+func (b migrationProgramBuilder) expression(expr ast.Expr) (result *migrationExpression) {
 	*b.left--
 	if *b.left < 0 {
 		return nil
 	}
 	if expr == nil {
 		return &migrationExpression{Kind: '?'}
+	}
+	typ := b.c.pass.TypesInfo.TypeOf(expr)
+	if typ != nil {
+		if _, parameter := types.Unalias(typ).(*types.TypeParam); parameter {
+			return nil
+		}
+		if _, iface := typ.Underlying().(*types.Interface); iface {
+			defer func() {
+				if result != nil {
+					result.Box = true
+				}
+			}()
+		} else {
+			defer func() {
+				if result != nil {
+					if basic, ok := typ.Underlying().(*types.Basic); ok && basic.Info()&types.IsUntyped != 0 {
+						return
+					}
+					result.Concrete = true
+					left := *b.left
+					if desc := describeMigrationType(typ, &left); desc != nil && left >= 0 {
+						result.Type, *b.left = desc, left
+					}
+				}
+			}()
+		}
 	}
 	expr = ast.Unparen(expr)
 	if id, ok := expr.(*ast.Ident); ok {
@@ -170,6 +279,16 @@ func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression 
 		}
 		if variable, ok := obj.(*types.Var); ok && variable.Pkg() != nil && variable.Parent() == variable.Pkg().Scope() {
 			return nil
+		}
+		if variable, ok := obj.(*types.Var); ok && variable.Parent() != nil {
+			defer func() {
+				if *b.left >= 0 && (result == nil || !validMigrationExpression(result)) {
+					// Reading a local does not execute its initializer again.
+					// Unsupported value provenance remains unknown; effects of
+					// the initializer are checked where it executes.
+					result = &migrationExpression{Kind: '?'}
+				}
+			}()
 		}
 	}
 	if variable, ok := directObject(b.c.pass.TypesInfo, expr).(*types.Var); ok && variable.Pkg() != nil && variable.Parent() == variable.Pkg().Scope() {
@@ -183,6 +302,9 @@ func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression 
 	if value.Value != nil && value.Value.Kind() == constant.Bool {
 		return &migrationExpression{Kind: 'b', Text: value.Value.ExactString()}
 	}
+	if value.Value != nil {
+		return &migrationExpression{Kind: '?'}
+	}
 	switch expr := expr.(type) {
 	case *ast.Ident:
 		if fn := b.c.object(expr); fn != nil {
@@ -194,7 +316,7 @@ func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression 
 			return &migrationExpression{Kind: '!', Left: b.expression(expr.X)}
 		}
 		if expr.Op == token.AND {
-			return b.expression(expr.X)
+			return &migrationExpression{Kind: '@', Left: b.expression(expr.X)}
 		}
 		return nil
 	case *ast.BinaryExpr:
@@ -222,6 +344,14 @@ func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression 
 		args := expr.Args
 		if fn != nil {
 			result.Target = b.target(fn, expr, expr)
+			if recv := fn.Type().(*types.Signature).Recv(); recv != nil {
+				if _, iface := recv.Type().Underlying().(*types.Interface); iface {
+					result.Method = fn.Name()
+					if fn.Pkg() != nil {
+						result.MethodPackage = fn.Pkg().Path()
+					}
+				}
+			}
 			if _, receiver, methodArgs := b.c.methodCall(expr); receiver != nil {
 				result.Left, args = b.expression(receiver), methodArgs
 				if result.Left == nil {
@@ -289,6 +419,7 @@ func (b migrationProgramBuilder) expression(expr ast.Expr) *migrationExpression 
 
 func (b migrationProgramBuilder) target(fn *types.Func, site ast.Node, call *ast.CallExpr) *migrationTarget {
 	target := &migrationTarget{Frame: migrationFrame{Symbol: fn.FullName(), Position: b.c.pass.Fset.PositionFor(site.Pos(), false)}}
+	target.Formatting = migrationFormattingOperation(fn)
 	if fn.Pkg() != nil {
 		switch fn.Pkg().Path() {
 		case "testing":
@@ -375,7 +506,7 @@ func validMigrationExpression(expr *migrationExpression) bool {
 		return false
 	}
 	switch expr.Kind {
-	case '!', 'f':
+	case '!', 'f', 'a', '@':
 		if !validMigrationExpression(expr.Left) {
 			return false
 		}

@@ -210,15 +210,30 @@ func TestCLIMigrationSSA(t *testing.T) {
 }
 
 func TestCLIMigrationPool(t *testing.T) {
+	runMigrationDecisionFixture(t, "migrationpool", "pool_test.go", []string{"store/store.go"}, []string{
+		"TestPutValue", "TestPutFunction", "TestImportedPut", "TestMethodExpression", "TestConcreteInterface",
+	})
+}
+
+func TestCLIMigrationInterfaces(t *testing.T) {
+	runMigrationDecisionFixture(t, "migrationinterfaces", "interfaces_test.go", []string{"guard/guard.go"}, []string{
+		"TestTestingReceiver", "TestConstructedTestingReceiver", "TestLocalReceiver", "TestDifferentHelperSignature",
+		"TestPrivateMethodIdentity", "TestNilInterface", "TestBasicFormatting",
+		"TestReceivedArgument",
+	})
+}
+
+func runMigrationDecisionFixture(t *testing.T, fixture, filename string, dependencies, positive []string) {
+	t.Helper()
 	if *cliBinary == "" {
 		t.Skip("run make integration to test the standalone binary")
 	}
 	module := t.TempDir()
-	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module migrationpool\n\ngo 1.26.0\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module "+fixture+"\n\ngo 1.26.0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, relative := range []string{"pool_test.go", "store/store.go"} {
-		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "testdata", "src", "migrationpool", relative))
+	for _, relative := range append([]string{filename}, dependencies...) {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "testdata", "src", fixture, relative))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +247,7 @@ func TestCLIMigrationPool(t *testing.T) {
 	}
 	stdout, stderr, exit := runCommand(t, module, *cliBinary, "-checks=ST102", "-explain-migration", "-json", ".")
 	if exit != 0 {
-		t.Fatalf("pool scan failed: exit=%d\n%s%s", exit, stdout, stderr)
+		t.Fatalf("%s scan failed: exit=%d\n%s%s", fixture, exit, stdout, stderr)
 	}
 	var result map[string]map[string][]struct {
 		Category string
@@ -241,33 +256,35 @@ func TestCLIMigrationPool(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatal(err)
 	}
-	positive := map[string]bool{
-		"TestPutValue": false, "TestPutFunction": false, "TestImportedPut": false,
-		"TestMethodExpression": false, "TestConcreteInterface": false,
+	found := make(map[string]bool)
+	for _, name := range positive {
+		found[name] = false
 	}
 	for _, analyzers := range result {
 		for _, diagnostic := range analyzers["bubblelint"] {
 			if diagnostic.Category != "ST102" {
 				continue
 			}
+			entryFound := false
 			for _, related := range diagnostic.Related {
 				if entry, ok := strings.CutPrefix(related.Message, "test entry: "); ok {
-					if _, expected := positive[entry]; !expected || positive[entry] {
-						t.Fatalf("unexpected pool candidate: %s", entry)
+					if _, expected := found[entry]; !expected || found[entry] {
+						t.Fatalf("unexpected %s candidate: %s", fixture, entry)
 					}
-					positive[entry] = true
+					found[entry], entryFound = true, true
 				}
+			}
+			if !entryFound {
+				t.Fatalf("%s candidate has no test entry: %+v", fixture, diagnostic)
 			}
 		}
 	}
-	var names []string
-	for name, found := range positive {
-		if !found {
-			t.Fatalf("missing pool candidate: %s\n%s", name, stdout)
+	for name, present := range found {
+		if !present {
+			t.Fatalf("missing %s candidate: %s\n%s", fixture, name, stdout)
 		}
-		names = append(names, name)
 	}
-	runProposedMigrations(t, module, "pool_test.go", names)
+	runProposedMigrations(t, module, filename, positive)
 }
 
 func TestCLIMigrationBoundaries(t *testing.T) {

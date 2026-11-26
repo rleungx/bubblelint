@@ -88,30 +88,34 @@ type checker struct {
 	aliases         map[types.Object]ast.Expr
 	functionResults map[types.Object]functionResult
 	assigned        map[types.Object]bool
+	assignments     map[types.Object]int
 	timeouts        map[*ast.CallExpr]bool
 	visited         map[visitKey]bool
 	reported        map[token.Pos]map[string]bool
 	roots           []function
 
-	parallelFixes     map[*ast.CallExpr][]analysis.SuggestedFix
-	migrationFixes    map[*ast.CallExpr][]analysis.SuggestedFix
-	migrationBarriers map[*ast.BlockStmt]bool
-	reviewBarriers    map[*ast.BlockStmt]bool
-	effects           *migrationEffectsResult
-	explainMigration  bool
-	effectConditional bool
-	coarseEffects     *migrationEffectsResult
-	programs          map[*ast.BlockStmt]*migrationProgram
-	programBuilding   map[*ast.BlockStmt]bool
-	objectReferences  map[ast.Expr]int
-	contextProofs     map[*ast.BlockStmt][]migrationSSAProof
-	contextNotes      map[*ast.BlockStmt][]analysis.RelatedInformation
-	reviewScopes      map[*ast.BlockStmt]*migrationReviewScope
+	parallelFixes      map[*ast.CallExpr][]analysis.SuggestedFix
+	migrationFixes     map[*ast.CallExpr][]analysis.SuggestedFix
+	migrationBarriers  map[*ast.BlockStmt]bool
+	reviewBarriers     map[*ast.BlockStmt]bool
+	effects            *migrationEffectsResult
+	explainMigration   bool
+	effectConditional  bool
+	coarseEffects      *migrationEffectsResult
+	programs           map[*ast.BlockStmt]*migrationProgram
+	programBuilding    map[*ast.BlockStmt]bool
+	objectReferences   map[ast.Expr]int
+	migrationTypes     *migrationTypeResolver
+	migrationFactOwner bool
+	contextProofs      map[*ast.BlockStmt][]migrationSSAProof
+	contextNotes       map[*ast.BlockStmt][]analysis.RelatedInformation
+	reviewScopes       map[*ast.BlockStmt]*migrationReviewScope
 }
 
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
 	return &checker{
 		pass: pass, checks: checks,
+		migrationTypes:  &migrationTypeResolver{root: pass.Pkg},
 		functions:       make(map[*types.Func]function),
 		aliases:         make(map[types.Object]ast.Expr),
 		functionResults: make(map[types.Object]functionResult),
@@ -219,6 +223,7 @@ func (c *checker) collect(includeProduction bool) {
 			delete(c.aliases, obj)
 		}
 	}
+	c.assignments = writes
 	for obj, count := range writes {
 		if count != 1 {
 			delete(c.functionResults, obj)

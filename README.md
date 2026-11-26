@@ -169,11 +169,25 @@ boundaries, while a wrapper around network I/O retains that effect. Immutable
 interface values with known concrete receivers use the concrete method's
 summary. Decision summaries retain boolean and nil conditions, short-circuit
 expressions, early returns, and calls to known function or literal callbacks.
-They also follow fields of single-use local object literals and simple factory
-returns. Field writes, aliases, or escape invalidate that field knowledge.
+Immutable local bindings and comma-ok type assertions in `if` initializers also
+retain their values. Concrete interface types travel through constructor
+results and object fields. Interface matching uses Go type identity and method
+signatures, including package identity for unexported methods. Unknown arguments
+remain unknown without discarding independent receiver type information.
+Decision summaries also follow fields of single-use local object literals and
+simple factory returns. Field writes, aliases, or escape invalidate that field knowledge.
 Callbacks registered through modeled APIs such as `t.Cleanup` retain their
 effects. Unsupported bodies and analysis work limits use the conservative
 effect summary; they never establish eligibility by dropping a path.
+An early return on an unknown path prevents the final return from establishing
+the result's value or concrete interface type. Unsupported type descriptions,
+unavailable method facts, and promoted receivers without a public operation
+model remain unproven. Formatting through a resolved interface still checks for
+user-defined `String` and `Error` methods. Nil pointers stored in interfaces stay
+distinct from nil interfaces. Interface equality preserves dynamic type identity,
+and taking a field address does not turn that address into the field's value.
+Generic functions retain their ordinary effect summaries: these decision facts
+do not yet carry type-argument environments.
 Generated functions supply the same effect and decision summaries as handwritten
 code, while diagnostics in generated files remain suppressed.
 
