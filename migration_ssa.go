@@ -406,6 +406,11 @@ func (m *migrationSSAMachine) discover(c *migrationSSAContext) {
 					m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
 				}
 			}
+			if migrationPoolOperation(ssaCallObject(call.Common())) == "Put" {
+				// A pool may publish its argument to another Get. Effect safety
+				// does not preserve exclusive ownership of the stored value.
+				m.escapeCall(c, call, nil)
+			}
 			if atomicOperation(call.Common()) != "" || c.modeled(call) {
 				// A public API model does not describe callback writes or lifetime.
 				for _, arg := range call.Common().Args {

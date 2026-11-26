@@ -328,6 +328,13 @@ func (c *checker) migrationInvocationEffects(body *ast.BlockStmt, call *ast.Call
 				return nil
 			}
 		case "sync":
+			switch migrationPoolOperation(fn) {
+			case "Put":
+				return nil
+			case "Get":
+				add(effectOpaqueCall, "the pool's New callback effects have not been established")
+				return nil
+			}
 			if fn.Name() == "Lock" || fn.Name() == "RLock" {
 				add(effectMutex, "mutex contention and progress have not been established")
 				return nil

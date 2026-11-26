@@ -353,6 +353,8 @@ func knownMigrationCall(fn *types.Func) bool {
 		return receiver == "" && (fn.Name() == "Background" || fn.Name() == "TODO")
 	case "sync":
 		switch receiver {
+		case "Pool":
+			return fn.Name() == "Put"
 		case "WaitGroup":
 			switch fn.Name() {
 			case "Add", "Done", "Go", "Wait":

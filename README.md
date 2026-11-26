@@ -196,6 +196,11 @@ returned values are not modeled invalidate their input value facts; a branch
 depending on those values remains unknown. Raw atomic loads and stores share the
 ordinary memory cell, including initialization before a worker starts.
 
+`sync.Pool.Put` has no external blocking effect and does not invoke stored
+functions or the pool's `New` callback. Stored values escape: their fields can no
+longer justify excluding a branch. `Pool.Get` remains unproven because it may
+invoke `New`; the analysis does not assume it returns a previously stored value.
+
 Concrete interface methods use their package's effect summaries. Promoted methods
 use SSA's receiver adjustments rather than assuming that the embedded receiver
 matches the outer object. Referenced method facts are cached during their owning

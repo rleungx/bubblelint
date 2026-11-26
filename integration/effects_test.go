@@ -209,6 +209,67 @@ func TestCLIMigrationSSA(t *testing.T) {
 	})
 }
 
+func TestCLIMigrationPool(t *testing.T) {
+	if *cliBinary == "" {
+		t.Skip("run make integration to test the standalone binary")
+	}
+	module := t.TempDir()
+	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module migrationpool\n\ngo 1.26.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{"pool_test.go", "store/store.go"} {
+		data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "testdata", "src", "migrationpool", relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(module, relative)
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, exit := runCommand(t, module, *cliBinary, "-checks=ST102", "-explain-migration", "-json", ".")
+	if exit != 0 {
+		t.Fatalf("pool scan failed: exit=%d\n%s%s", exit, stdout, stderr)
+	}
+	var result map[string]map[string][]struct {
+		Category string
+		Related  []struct{ Message string }
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	positive := map[string]bool{
+		"TestPutValue": false, "TestPutFunction": false, "TestImportedPut": false,
+		"TestMethodExpression": false, "TestConcreteInterface": false,
+	}
+	for _, analyzers := range result {
+		for _, diagnostic := range analyzers["bubblelint"] {
+			if diagnostic.Category != "ST102" {
+				continue
+			}
+			for _, related := range diagnostic.Related {
+				if entry, ok := strings.CutPrefix(related.Message, "test entry: "); ok {
+					if _, expected := positive[entry]; !expected || positive[entry] {
+						t.Fatalf("unexpected pool candidate: %s", entry)
+					}
+					positive[entry] = true
+				}
+			}
+		}
+	}
+	var names []string
+	for name, found := range positive {
+		if !found {
+			t.Fatalf("missing pool candidate: %s\n%s", name, stdout)
+		}
+		names = append(names, name)
+	}
+	runProposedMigrations(t, module, "pool_test.go", names)
+}
+
 func TestCLIMigrationBoundaries(t *testing.T) {
 	if *cliBinary == "" {
 		t.Skip("run make integration to test the standalone binary")
