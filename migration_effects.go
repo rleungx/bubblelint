@@ -97,6 +97,7 @@ type migrationFact struct {
 	Timer    bool
 	Decision []byte
 	program  *migrationProgram
+	decoded  bool
 }
 
 func (*migrationFact) AFact() {}
@@ -162,6 +163,7 @@ func newMigrationEffectsAnalyzer(enabled func() bool) *analysis.Analyzer {
 				reasons: make(map[*ast.BlockStmt]migrationReasonSet), timers: make(map[*ast.BlockStmt]bool), imported: c.coarseEffects.imported,
 			}
 			c.findMigrationBarriers()
+			c.cacheReferencedMigrationFacts()
 			for fn, body := range c.functions {
 				if fn != nil && fn.Exported() {
 					fact := &migrationFact{
@@ -213,23 +215,62 @@ func (c *checker) addMigrationReason(body *ast.BlockStmt, kind migrationEffect, 
 }
 
 func (c *checker) importMigrationFact(fn *types.Func) *migrationFact {
-	fn = fn.Origin()
-	if fact, known := c.effects.imported[fn]; known {
-		return fact
-	}
-	var fact migrationFact
-	if c.pass.ImportObjectFact != nil && fn.Pkg() != c.pass.Pkg && c.pass.ImportObjectFact(fn, &fact) {
+	fact := c.cacheMigrationFact(fn)
+	if fact != nil && !fact.decoded {
+		fact.decoded = true
 		if len(fact.Decision) != 0 {
 			var program migrationProgram
 			if json.Unmarshal(fact.Decision, &program) == nil {
 				fact.program = &program
 			}
 		}
+	}
+	return fact
+}
+
+func (c *checker) cacheMigrationFact(fn *types.Func) *migrationFact {
+	fn = fn.Origin()
+	if fact, known := c.effects.imported[fn]; known {
+		return fact
+	}
+	var fact migrationFact
+	if c.pass.ImportObjectFact != nil && fn.Pkg() != nil && fn.Pkg() != c.pass.Pkg && c.pass.ImportObjectFact(fn, &fact) {
 		c.effects.imported[fn] = &fact
 		return &fact
 	}
 	c.effects.imported[fn] = nil
 	return nil
+}
+
+// The dependent analyzer resolves test-specific dispatch after this pass ends.
+// Import facts for referenced functions and concrete method sets here: facts
+// belong to this analyzer and cannot be imported through the dependent pass.
+// Keep decision payloads encoded until a resolved call actually needs them.
+func (c *checker) cacheReferencedMigrationFacts() {
+	seen := make(map[*types.Named]bool)
+	for _, info := range c.pass.TypesInfo.Types {
+		t := types.Unalias(info.Type)
+		if pointer, ok := t.(*types.Pointer); ok {
+			t = types.Unalias(pointer.Elem())
+		}
+		named, ok := t.(*types.Named)
+		if !ok || seen[named] {
+			continue
+		}
+		seen[named] = true
+		methods := types.NewMethodSet(types.NewPointer(named))
+		for i := 0; i < methods.Len(); i++ {
+			fn := methods.At(i).Obj().(*types.Func)
+			if fn.Pkg() != c.pass.Pkg && fn.Exported() {
+				c.cacheMigrationFact(fn)
+			}
+		}
+	}
+	for _, obj := range c.pass.TypesInfo.Uses {
+		if fn, ok := obj.(*types.Func); ok && fn.Pkg() != c.pass.Pkg {
+			c.cacheMigrationFact(fn)
+		}
+	}
 }
 
 func (c *checker) mergeMigrationFact(body *ast.BlockStmt, fn *types.Func, call *ast.CallExpr, fact *migrationFact) {
@@ -245,6 +286,9 @@ func (c *checker) mergeMigrationFact(body *ast.BlockStmt, fn *types.Func, call *
 }
 
 func (c *checker) migrationInvocationEffects(body *ast.BlockStmt, call *ast.CallExpr, fn *types.Func) *migrationFact {
+	if migrationAtomicOperation(fn) != "" {
+		return nil
+	}
 	add := func(kind migrationEffect, message string) {
 		c.addMigrationReason(body, kind, call, fn.FullName(), message)
 	}

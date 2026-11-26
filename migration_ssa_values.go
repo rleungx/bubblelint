@@ -150,11 +150,7 @@ func (c *migrationSSAContext) value(v ssa.Value, at ssa.Instruction, seen map[mi
 			return binding.value(seen)
 		}
 	case *ssa.Alloc:
-		object := c.objects[v]
-		if object == nil {
-			object = &migrationSSAObject{v, c}
-			c.objects[v] = object
-		}
+		object := c.object(v)
 		result.location = &migrationSSALocation{object: object, typ: v.Type().Underlying().(*types.Pointer).Elem()}
 		result.nilKnown = true
 	case *ssa.FieldAddr:
@@ -324,4 +320,13 @@ func (c *migrationSSAContext) constrain(value ssa.Value, choices []migrationSSAV
 		choices = retained
 	}
 	return choices
+}
+
+func (c *migrationSSAContext) object(allocation *ssa.Alloc) *migrationSSAObject {
+	object := c.objects[allocation]
+	if object == nil {
+		object = &migrationSSAObject{allocation, c}
+		c.objects[allocation] = object
+	}
+	return object
 }

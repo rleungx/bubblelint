@@ -19,12 +19,8 @@ func ssaCallObject(call *ssa.CallCommon) *types.Func {
 	return nil
 }
 
-func atomicMethod(call *ssa.CallCommon) string {
-	fn := ssaCallObject(call)
-	if fn != nil && fn.Pkg() != nil && fn.Pkg().Path() == "sync/atomic" && fn.Type().(*types.Signature).Recv() != nil {
-		return fn.Name()
-	}
-	return ""
+func atomicOperation(call *ssa.CallCommon) string {
+	return migrationAtomicOperation(ssaCallObject(call))
 }
 
 func (c *migrationSSAContext) resolve(call ssa.CallInstruction, seen map[migrationSSAQuery]bool) (*ssa.Function, []migrationSSABinding, []migrationSSABinding) {
@@ -39,20 +35,12 @@ func (c *migrationSSAContext) resolve(call ssa.CallInstruction, seen map[migrati
 		if receiver.typ == nil {
 			return nil, nil, nil
 		}
-		method, index, _ := types.LookupFieldOrMethod(receiver.typ, true, common.Method.Pkg(), common.Method.Name())
-		target, ok := method.(*types.Func)
-		if !ok {
+		selection := c.machine.program.MethodSets.MethodSet(receiver.typ).Lookup(common.Method.Pkg(), common.Method.Name())
+		if selection == nil {
 			return nil, nil, nil
 		}
-		if len(index) != 1 || !types.Identical(target.Type().(*types.Signature).Recv().Type(), receiver.typ) {
-			// Promoted methods and implicit receiver dereferences need an
-			// explicit receiver adjustment before binding their parameters.
-			return nil, nil, nil
-		}
-		if _, unknown := target.Type().(*types.Signature).Recv().Type().Underlying().(*types.Interface); unknown {
-			return nil, nil, nil
-		}
-		fn.function = c.machine.program.FuncValue(target)
+		// SSA supplies receiver adjustments for promoted and value methods.
+		fn.function = c.machine.program.MethodValue(selection)
 		args = append(args, migrationSSABinding{context: c, expression: common.Value, at: call, unwrap: true})
 	}
 	for _, arg := range common.Args {
@@ -74,7 +62,7 @@ func (c *migrationSSAContext) modeled(call ssa.CallInstruction) bool {
 	if fn == nil || fn.Pkg() == nil {
 		return false
 	}
-	if fn.Pkg().Path() == "sync/atomic" && atomicMethod(call.Common()) != "" {
+	if fn.Pkg().Path() == "sync/atomic" && atomicOperation(call.Common()) != "" {
 		return true
 	}
 	_, ok := c.standardValue(call, make(map[migrationSSAQuery]bool))
@@ -91,9 +79,10 @@ func (c *migrationSSAContext) standardValue(call ssa.CallInstruction, seen map[m
 		return migrationSSAValue{}, false
 	}
 	path, name := fn.Pkg().Path(), fn.Name()
-	if atomicMethod(common) == "Load" && len(common.Args) > 0 {
+	if atomicOperation(common) == "Load" && len(common.Args) > 0 {
 		receiver := c.value(common.Args[0], call, seen)
-		return c.machine.read(receiver.location, c, call, fn.Type().(*types.Signature).Results().At(0).Type(), true, seen), true
+		container := fn.Type().(*types.Signature).Recv() != nil
+		return c.machine.read(receiver.location, c, call, fn.Type().(*types.Signature).Results().At(0).Type(), container, seen), true
 	}
 	if path == "testing" && name == "Context" && len(common.Args) == 1 && c.value(common.Args[0], call, seen).bubbleTestingT {
 		return migrationSSAValue{contextKnown: true, contextHasDone: true}, true
@@ -181,6 +170,14 @@ func (c *migrationSSAContext) summary() migrationSSAResult {
 func (c *migrationSSAContext) fallback(call ssa.CallInstruction) migrationSSAResult {
 	result := migrationSSAResult{reasons: make(migrationReasonSet)}
 	fn := ssaCallObject(call.Common())
+	dispatched := false
+	if call.Common().IsInvoke() {
+		if target, _, _ := c.resolve(call, make(map[migrationSSAQuery]bool)); target != nil {
+			if concrete, ok := target.Object().(*types.Func); ok {
+				fn, dispatched = concrete, true
+			}
+		}
+	}
 	if fn == nil {
 		if c.value(call.Common().Value, call, make(map[migrationSSAQuery]bool)).cancel {
 			return result
@@ -203,7 +200,11 @@ func (c *migrationSSAContext) fallback(call ssa.CallInstruction) migrationSSARes
 	if callAST == nil {
 		callAST = &ast.CallExpr{Fun: &ast.Ident{Name: fn.Name(), NamePos: call.Pos()}, Lparen: call.Pos()}
 	}
-	if specialized, _ := temporary.specializeMigrationCall(body, callAST, true); specialized {
+	specialized := false
+	if !dispatched {
+		specialized, _ = temporary.specializeMigrationCall(body, callAST, true)
+	}
+	if specialized {
 		result.timer = temporary.effects.timers[body]
 	} else if fact := temporary.migrationInvocationEffects(body, callAST, fn); fact != nil {
 		result.timer = fact.Timer
@@ -230,10 +231,7 @@ func (c *migrationSSAContext) callEffects(call ssa.CallInstruction) migrationSSA
 			}
 		}
 	}
-	if method := atomicMethod(common); method != "" {
-		if method != "Load" && method != "Store" {
-			c.reason(&result, effectOpaqueCall, call.Pos(), fn.FullName(), "the atomic update's value flow has not been established")
-		}
+	if atomicOperation(common) != "" {
 		return result
 	}
 	if _, ok := c.standardValue(call, make(map[migrationSSAQuery]bool)); ok {

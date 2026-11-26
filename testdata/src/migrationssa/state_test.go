@@ -432,3 +432,224 @@ func TestBorrowedChannelSubtest(t *testing.T) {
 		}
 	})
 }
+
+func TestImportedConcreteInterface(t *testing.T) {
+	s := newService(&opaque.Local{})
+	done := make(chan struct{})
+	go func() { defer close(done); s.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST102:"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestImportedRemoteInterface(t *testing.T) {
+	s := newService(&opaque.Remote{})
+	done := make(chan struct{})
+	go func() { defer close(done); s.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration blocked: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+type promotedLocal struct{ *local }
+type promotedImported struct{ *opaque.Local }
+
+func TestPromotedInterface(t *testing.T) {
+	s := newService(&promotedLocal{local: &local{}})
+	done := make(chan struct{})
+	go func() { defer close(done); s.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST102:"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestPromotedImportedInterface(t *testing.T) {
+	s := newService(&promotedImported{Local: &opaque.Local{}})
+	done := make(chan struct{})
+	go func() { defer close(done); s.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST102:"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestLoadedAliasEscape(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	holder := &struct{ worker *worker }{worker: w}
+	holder.worker = w
+	opaque.Touch(&holder.worker.enabled)
+	done := make(chan struct{})
+	go func() { defer close(done); w.runEnabled() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+type aliasNode struct {
+	next *aliasNode
+	flag *atomic.Bool
+}
+
+func TestCyclicAliasEscape(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	node := &aliasNode{flag: &w.enabled}
+	node.next = node
+	opaque.Touch(node.next.next.flag)
+	done := make(chan struct{})
+	go func() { defer close(done); w.runEnabled() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestAggregateAliasEscape(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	holder := struct{ worker *worker }{worker: w}
+	copy := holder
+	opaque.Touch(&copy.worker.enabled)
+	done := make(chan struct{})
+	go func() { defer close(done); w.runEnabled() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func storeMaybe(local, external *atomic.Bool) {
+	selected := local
+	select {
+	case <-time.After(time.Millisecond):
+		selected = external
+	default:
+	}
+	selected.Store(true)
+}
+
+func TestPartiallyKnownAlias(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	storeMaybe(&w.enabled, opaque.NewFlag())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if w.enabled.Load() {
+			time.Sleep(time.Millisecond)
+		} else {
+			fetch()
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestUnstableDispatch(t *testing.T) {
+	s := newService(&local{})
+	opaque.Forget(&s.backend)
+	w := newWorker(t.Context())
+	defer w.cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.run(); w.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: the interface call target is unknown"
+		t.Fatal("worker did not finish")
+	}
+}
+
+type counterWorker struct{ counter atomic.Int64 }
+
+func (w *counterWorker) run() {
+	w.counter.Add(1)
+	w.counter.And(7)
+	w.counter.Or(1)
+	w.counter.CompareAndSwap(1, 2)
+	time.Sleep(time.Millisecond)
+}
+
+func TestAtomicUpdates(t *testing.T) {
+	w := &counterWorker{}
+	done := make(chan struct{})
+	go func() { defer close(done); w.run() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "ST102:"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func rawAtomicWorker(flag *int64) {
+	if atomic.LoadInt64(flag) != 0 {
+		fetch()
+	} else {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestRawAtomicInitialStore(t *testing.T) {
+	flag := int64(1)
+	done := make(chan struct{})
+	go func() { defer close(done); rawAtomicWorker(&flag) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration blocked: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestRawAtomicStore(t *testing.T) {
+	var flag int64
+	atomic.StoreInt64(&flag, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); rawAtomicWorker(&flag) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration blocked: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestAtomicUpdateBranch(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	w.enabled.CompareAndSwap(false, true)
+	done := make(chan struct{})
+	go func() { defer close(done); w.runEnabled() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}
+
+func TestAtomicPointerEscape(t *testing.T) {
+	w := newWorker(t.Context())
+	defer w.cancel()
+	var pointer atomic.Pointer[worker]
+	pointer.Swap(w)
+	opaque.Apply(&pointer, func(actual *worker) { actual.enabled.Store(true) })
+	done := make(chan struct{})
+	go func() { defer close(done); w.runEnabled() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second): // want "migration unproven: conditional path: external network I/O"
+		t.Fatal("worker did not finish")
+	}
+}

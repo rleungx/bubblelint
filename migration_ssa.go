@@ -65,6 +65,7 @@ type migrationSSAMachine struct {
 	base           *migrationEffectsResult
 	root           *ast.BlockStmt
 	contexts       []*migrationSSAContext
+	aliases        *migrationSSAAliases
 	writes         []migrationSSAWrite
 	escapes        []migrationSSAEscape
 	escaped        []*migrationSSALocation
@@ -228,7 +229,7 @@ func (c *checker) refineMigrationContexts() {
 		if !m.failed {
 			m.sealed = true
 			m.phase = "escape analysis"
-			m.findEscapes()
+			m.stabilizeEscapes()
 		}
 		if !m.failed {
 			m.left = 16384
@@ -360,8 +361,9 @@ func (m *migrationSSAMachine) newContext(fn *ssa.Function, parent *migrationSSAC
 			if store, ok := instruction.(*ssa.Store); ok {
 				m.writes = append(m.writes, migrationSSAWrite{context: c, site: store, address: store.Addr, value: store.Val})
 			}
-			if call, ok := instruction.(*ssa.Call); ok && atomicMethod(call.Common()) == "Store" && len(call.Call.Args) > 1 {
-				m.writes = append(m.writes, migrationSSAWrite{context: c, site: call, address: call.Call.Args[0], value: call.Call.Args[1], atomic: true})
+			if call, ok := instruction.(*ssa.Call); ok && atomicOperation(call.Common()) == "Store" && len(call.Call.Args) > 1 {
+				container := ssaCallObject(call.Common()).Type().(*types.Signature).Recv() != nil
+				m.writes = append(m.writes, migrationSSAWrite{context: c, site: call, address: call.Call.Args[0], value: call.Call.Args[1], atomic: container})
 			}
 		}
 	}
@@ -386,10 +388,12 @@ func (m *migrationSSAMachine) discover(c *migrationSSAContext) {
 					m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
 				}
 			}
-			if method := atomicMethod(call.Common()); method != "" && method != "Load" && method != "Store" && len(call.Common().Args) > 0 {
-				m.escapes = append(m.escapes, migrationSSAEscape{c, call, call.Common().Args[0]})
+			if method := atomicOperation(call.Common()); method != "" && method != "Load" && method != "Store" && len(call.Common().Args) > 0 {
+				for _, arg := range call.Common().Args {
+					m.escapes = append(m.escapes, migrationSSAEscape{c, call, arg})
+				}
 			}
-			if atomicMethod(call.Common()) != "" || c.modeled(call) {
+			if atomicOperation(call.Common()) != "" || c.modeled(call) {
 				// A public API model does not describe callback writes or lifetime.
 				for _, arg := range call.Common().Args {
 					if _, callback := arg.Type().Underlying().(*types.Signature); callback {
@@ -451,6 +455,20 @@ func (m *migrationSSAMachine) read(location *migrationSSALocation, c *migrationS
 		}
 	}
 	var matching []migrationSSAWrite
+	if m.aliases != nil {
+		for _, candidate := range m.aliases.writes[location.object] {
+			write := m.writes[candidate.index]
+			if candidate.address.path == location.path && write.atomic == atomic {
+				if !candidate.precise {
+					return migrationSSAValue{}
+				}
+				matching = append(matching, write)
+			} else if candidate.address.contains(location) && !write.atomic {
+				return migrationSSAValue{}
+			}
+		}
+		return m.readWrites(matching, c, at, typ, seen)
+	}
 	for _, write := range m.writes {
 		pointer, ok := write.address.Type().Underlying().(*types.Pointer)
 		if !ok || !m.storeMayAffect(pointer.Elem(), location.typ) {
@@ -466,6 +484,10 @@ func (m *migrationSSAMachine) read(location *migrationSSALocation, c *migrationS
 			return migrationSSAValue{}
 		}
 	}
+	return m.readWrites(matching, c, at, typ, seen)
+}
+
+func (m *migrationSSAMachine) readWrites(matching []migrationSSAWrite, c *migrationSSAContext, at ssa.Instruction, typ types.Type, seen map[migrationSSAQuery]bool) migrationSSAValue {
 	if len(matching) == 0 {
 		if m.sealed {
 			return migrationSSAZero(typ)
@@ -578,76 +600,4 @@ func migrationSSAWriteBefore(write migrationSSAWrite, read *migrationSSAContext,
 		at = b.site
 	}
 	return instructionDominates(point, at)
-}
-
-func (m *migrationSSAMachine) findEscapes() {
-	add := func(location *migrationSSALocation) bool {
-		if location == nil {
-			return false
-		}
-		for _, old := range m.escaped {
-			if old.contains(location) {
-				return false
-			}
-		}
-		m.escaped = append(m.escaped, location)
-		return true
-	}
-	var locations func(migrationSSAValue) []*migrationSSALocation
-	locations = func(value migrationSSAValue) []*migrationSSALocation {
-		if !m.spend() {
-			return nil
-		}
-		var result []*migrationSSALocation
-		if value.location != nil {
-			result = append(result, value.location)
-		}
-		if value.actual != nil {
-			result = append(result, locations(*value.actual)...)
-		}
-		for _, v := range value.choices {
-			result = append(result, locations(v)...)
-		}
-		if value.closure != nil {
-			for _, capture := range value.bindings {
-				result = append(result, locations(value.closure.value(capture, value.closureSite, make(map[migrationSSAQuery]bool)))...)
-			}
-		}
-		return result
-	}
-	for _, escape := range m.escapes {
-		if !m.mayCarryReference(escape.expression.Type()) {
-			continue
-		}
-		for _, location := range locations(escape.context.value(escape.expression, escape.site, make(map[migrationSSAQuery]bool))) {
-			add(location)
-		}
-	}
-	for changed := true; changed && !m.failed; {
-		changed = false
-		for _, write := range m.writes {
-			if !m.mayCarryReference(write.value.Type()) {
-				continue
-			}
-			if !m.spend() {
-				return
-			}
-			address := write.context.value(write.address, write.site, make(map[migrationSSAQuery]bool))
-			location := address.location
-			if location == nil {
-				for _, possible := range locations(address) {
-					changed = add(possible) || changed
-				}
-			}
-			escapes := location == nil
-			for _, old := range m.escaped {
-				escapes = escapes || old.contains(location)
-			}
-			if escapes {
-				for _, stored := range locations(write.context.value(write.value, write.site, make(map[migrationSSAQuery]bool))) {
-					changed = add(stored) || changed
-				}
-			}
-		}
-	}
 }

@@ -199,10 +199,14 @@ func TestCLIMigrationSSA(t *testing.T) {
 			}
 		}
 	}
-	if counts["ST102"] != 3 || counts["blocked"] != 5 || counts["unproven"] != 16 || !proof {
+	if counts["ST102"] != 7 || counts["blocked"] != 8 || counts["unproven"] != 23 || !proof {
 		t.Fatalf("incorrect SSA assessments: %v, branch evidence=%v\n%s", counts, proof, stdout)
 	}
-	runProposedMigrations(t, module, "state_test.go", []string{"TestZeroAtomic", "TestConcreteInterface", "TestFreshSubtest/local"})
+	runProposedMigrations(t, module, "state_test.go", []string{
+		"TestZeroAtomic", "TestConcreteInterface", "TestFreshSubtest/local",
+		"TestImportedConcreteInterface", "TestPromotedInterface", "TestPromotedImportedInterface",
+		"TestAtomicUpdates",
+	})
 }
 
 func TestCLIMigrationProtocol(t *testing.T) {

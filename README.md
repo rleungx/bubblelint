@@ -172,6 +172,25 @@ field aliases, concrete interface receivers, and public `sync/atomic` load/store
 contracts. A field has a known value only when it has no writes or one write
 that dominates the read, including writes completed before a worker starts.
 Escapes, multiple writes, and writes after worker launch leave the value unknown.
+Escape propagation uses a separate graph of possible references through fields,
+loads, stores, interfaces, and closure captures. Cycles and overwritten reference
+fields retain every possible alias, even when their current value is unknown.
+Unknown targets remain in the graph; a write establishes a value only when its
+address has exactly one target and no unknown alternatives.
+The graph also indexes possible writes, so checking a field does not recursively
+resolve every store's address again. If a discovered call target becomes unknown,
+its inputs escape and its conservative effects remain; independent state proofs
+can still be used.
+Public atomic updates have no external blocking effect. Updates whose stored or
+returned values are not modeled invalidate their input value facts; a branch
+depending on those values remains unknown. Raw atomic loads and stores share the
+ordinary memory cell, including initialization before a worker starts.
+
+Concrete interface methods use their package's effect summaries. Promoted methods
+use SSA's receiver adjustments rather than assuming that the embedded receiver
+matches the outer object. Referenced method facts are cached during their owning
+analysis pass; decision payloads are decoded only when a caller needs them.
+
 This refinement does not simulate scheduling or unroll loops. Recursive call
 edges and call-context limits invalidate the callee's inputs and retain its
 conservative effects. Loops and unmodeled callback registrations retain their
