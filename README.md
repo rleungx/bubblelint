@@ -79,6 +79,14 @@ It currently handles one inline worker followed by a select in a test, subtest,
 or local test helper; more complex worker and control-flow patterns can be
 missed. Protocols covered by ST101 do not also receive ST102 diagnostics.
 
+ST102 can propose wrapping the statements after a contiguous prefix of deferred
+calls, leaving those defers in the outer test. Their callee and arguments must
+not execute code or create resources during evaluation. Diagnostics identify
+the proposed scope and each outer defer. Setup, later defers, and cleanup
+registered inside that scope still participate in its effect checks. This is a
+manual migration boundary; ST100, ST101, and automatic fixes continue to use the
+full original test boundary.
+
 ST102 skips unknown calls, clock reads, synchronization primitives whose
 lifecycle is not modeled, shared package variables, recursive helpers, and
 unbounded loops. Its observed and completion channels must be created inside
@@ -91,11 +99,13 @@ virtual-time advance to keep testing the intended ordering.
 All migration checks withhold suggestions when visible network operations,
 mutex lock calls, unresolved interface or function-value calls, or
 `runtime.SetFinalizer`/`runtime.AddCleanup` registrations are reachable through
-local helpers or callbacks. Calls without an available body also block
+local helpers or callbacks. Starting another synctest bubble within the proposed
+scope also blocks a suggestion, since the resulting bubbles would be nested.
+Calls without an available body also block
 suggestions unless the operation has an explicit standard-library model or an
 available effect summary from its package.
-This includes opaque calls during setup and cleanup, and function values
-returned by external factories. Formatting arguments with unmodeled methods
+This includes opaque calls during setup and cleanup within the proposed scope,
+and function values returned by external factories. Formatting arguments with unmodeled methods
 also block suggestions because formatting may execute user-defined code.
 Unknown behavior is never treated as safe. Effects propagate back to callers,
 including through recursive helpers, and suppression is inherited by callees.

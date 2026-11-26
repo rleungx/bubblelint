@@ -18,6 +18,7 @@ type migrationSSAProof struct {
 type migrationSSAResult struct {
 	reasons migrationReasonSet
 	timer   bool
+	scoped  *migrationSSAResult
 }
 type migrationSSABinding struct {
 	context    *migrationSSAContext
@@ -80,6 +81,7 @@ type migrationSSAMachine struct {
 	stateReads     uint64
 	storeTypes     map[migrationSSAStoreTypes]bool
 	referenceTypes map[types.Type]bool
+	scope          *migrationReviewScope
 	left           int
 	sealed, failed bool
 }
@@ -106,7 +108,7 @@ func migrationSSABody(fn *ssa.Function) *ast.BlockStmt {
 	return nil
 }
 
-func hasMigrationSSACandidate(body *ast.BlockStmt) bool {
+func (c *checker) hasMigrationSSACandidate(body *ast.BlockStmt) bool {
 	worker, wait := false, false
 	ast.Inspect(body, func(node ast.Node) bool {
 		switch node := node.(type) {
@@ -115,6 +117,9 @@ func hasMigrationSSACandidate(body *ast.BlockStmt) bool {
 		case *ast.SelectStmt:
 			wait = true
 		case *ast.CallExpr:
+			if c.named(node.Fun, "testing/synctest", "Test") || c.named(node.Fun, "testing/synctest", "Run") {
+				return false
+			}
 			if s, ok := node.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Sleep" {
 				wait = true
 			}
@@ -133,7 +138,7 @@ func (c *checker) refineMigrationContexts() {
 	var roots []*types.Func
 	for fn, body := range c.functions {
 		for _, root := range c.roots {
-			if body.body == root.body && len(c.effects.reasons[body.body]) != 0 && hasMigrationSSACandidate(body.body) {
+			if body.body == root.body && len(c.effects.reasons[body.body]) != 0 && c.hasMigrationSSACandidate(body.body) {
 				roots = append(roots, fn)
 			}
 		}
@@ -201,7 +206,7 @@ func (c *checker) refineMigrationContexts() {
 				return true
 			}
 			callback, ok := c.callable(args[1])
-			if !ok || !hasMigrationSSACandidate(callback.body) {
+			if !ok || !c.hasMigrationSSACandidate(callback.body) {
 				return true
 			}
 			if function := byBody[callback.body]; function != nil && !seen[function] {
@@ -223,6 +228,7 @@ func (c *checker) refineMigrationContexts() {
 			addresses: make(map[migrationSSAQuery]migrationSSAValue), storeTypes: make(map[migrationSSAStoreTypes]bool),
 			referenceTypes: make(map[types.Type]bool),
 		}
+		m.scope = c.leadingDeferScope(m.root)
 		root := m.newContext(function, nil, nil, nil, nil)
 		m.phase = "mutation discovery"
 		m.discover(root)
@@ -250,6 +256,13 @@ func (c *checker) refineMigrationContexts() {
 		sort.Slice(c.contextNotes[m.root], func(i, j int) bool { return c.contextNotes[m.root][i].Pos < c.contextNotes[m.root][j].Pos })
 		if m.failed {
 			continue
+		}
+		if m.scope != nil && root.result.scoped != nil {
+			if c.reviewScopes == nil {
+				c.reviewScopes = make(map[*ast.BlockStmt]*migrationReviewScope)
+			}
+			m.scope.result = root.result.scoped
+			c.reviewScopes[m.root] = m.scope
 		}
 		for body, result := range m.results {
 			if body.Pos() < m.root.Pos() || body.End() > m.root.End() {

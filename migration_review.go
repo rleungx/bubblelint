@@ -19,7 +19,11 @@ type reviewWorker struct {
 // Review candidates connect a worker's final signal to a test receive. The
 // connection does not prove that the worker can run in a bubble.
 func (c *checker) findReviewCandidates(body *ast.BlockStmt, s state) {
-	if !c.supportsSynctest() || c.reviewBarriers[body] {
+	barrier := c.reviewBarriers[body]
+	if scope := c.reviewScopes[body]; scope != nil {
+		barrier = len(scope.result.reasons) != 0
+	}
+	if !c.supportsSynctest() || barrier {
 		return
 	}
 	hasWorker, hasSelect := false, false

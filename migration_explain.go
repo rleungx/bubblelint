@@ -16,6 +16,9 @@ func (c *checker) explainMigrationCandidate(body *ast.BlockStmt) {
 		return
 	}
 	reasons := c.effects.reasons[body].ordered()
+	if scope := c.reviewScopes[body]; scope != nil {
+		reasons = scope.result.reasons.ordered()
+	}
 	if len(reasons) == 0 {
 		return
 	}
@@ -84,6 +87,9 @@ func (c *checker) explainMigrationCandidate(body *ast.BlockStmt) {
 		Related: c.migrationEntryInformation(candidate),
 	}
 	diagnostic.Related = append(diagnostic.Related, c.migrationContextInformation(candidate)...)
+	if scope := c.reviewScope(candidate); scope != nil {
+		diagnostic.Related = append(diagnostic.Related, scope.information()...)
+	}
 	for _, reason := range reasons {
 		message := reason.Message
 		if reason.Conditional {

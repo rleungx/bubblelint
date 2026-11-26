@@ -67,7 +67,7 @@ func TestMixed(t *testing.T) {
 		go func() {}()
 		tm.Sleep(tm.Second)
 	})
-	tm.Sleep(tm.Second) // want "ST100:"
+	tm.Sleep(tm.Second)
 }
 
 func TestWaitGroup(t *testing.T) {

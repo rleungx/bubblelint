@@ -153,7 +153,11 @@ func (c *migrationSSAContext) callValue(call *ssa.Call, seen map[migrationSSAQue
 }
 
 func (c *migrationSSAContext) reason(result *migrationSSAResult, kind migrationEffect, pos token.Pos, symbol, message string) {
-	result.reasons.add(migrationReason{Kind: kind, Message: message, Trace: []migrationFrame{{Symbol: symbol, Position: c.machine.c.pass.Fset.PositionFor(pos, false)}}})
+	reason := migrationReason{Kind: kind, Message: message, Trace: []migrationFrame{{Symbol: symbol, Position: c.machine.c.pass.Fset.PositionFor(pos, false)}}}
+	result.reasons.add(reason)
+	if result.scoped != nil {
+		result.scoped.reasons.add(reason)
+	}
 }
 
 func (c *migrationSSAContext) summary() migrationSSAResult {
@@ -273,6 +277,9 @@ func (c *migrationSSAContext) analyze() migrationSSAResult {
 		return *c.result
 	}
 	result := migrationSSAResult{reasons: make(migrationReasonSet)}
+	if c.parent == nil && c.machine.scope != nil {
+		result.scoped = &migrationSSAResult{reasons: make(migrationReasonSet)}
+	}
 	if c.analyzing {
 		c.reason(&result, effectRecursion, c.function.Pos(), c.function.String(), "recursive termination has not been established")
 		return result
@@ -305,8 +312,14 @@ func (c *migrationSSAContext) analyze() migrationSSAResult {
 				effectsAt[call] = effects
 				for _, reason := range effects.reasons.ordered() {
 					result.reasons.add(reason)
+					if result.scoped != nil && call.Pos() >= c.machine.scope.start {
+						result.scoped.reasons.add(reason)
+					}
 				}
 				result.timer = result.timer || effects.timer
+				if result.scoped != nil && call.Pos() >= c.machine.scope.start {
+					result.scoped.timer = result.scoped.timer || effects.timer
+				}
 			}
 			switch instruction := instruction.(type) {
 			case *ssa.Panic:
@@ -362,28 +375,32 @@ func (c *migrationSSAContext) analyze() migrationSSAResult {
 		}
 	}
 	required := requiredMigrationGraphBlocks(blocks, func(block *ssa.BasicBlock) []*ssa.BasicBlock { return successors[block] })
-	for kind, reason := range result.reasons {
-		reason.Conditional = true
-		result.reasons[kind] = reason
-	}
-	for _, block := range c.function.Blocks {
-		if !reachable[block] {
-			continue
+	classify := func(target *migrationSSAResult, start token.Pos) {
+		for kind, reason := range target.reasons {
+			reason.Conditional = true
+			target.reasons[kind] = reason
 		}
-		for _, instruction := range block.Instrs {
-			call, ok := instruction.(ssa.CallInstruction)
-			if !ok {
+		for _, block := range c.function.Blocks {
+			if !reachable[block] || !required[block] {
 				continue
 			}
-			if required[block] {
+			for _, instruction := range block.Instrs {
+				call, ok := instruction.(ssa.CallInstruction)
+				if !ok || start.IsValid() && call.Pos() < start {
+					continue
+				}
 				effects := effectsAt[call]
 				for kind, reason := range effects.reasons {
 					if !reason.Conditional {
-						result.reasons[kind] = reason
+						target.reasons[kind] = reason
 					}
 				}
 			}
 		}
+	}
+	classify(&result, token.NoPos)
+	if result.scoped != nil {
+		classify(result.scoped, c.machine.scope.start)
 	}
 	if migrationSSACycle(successors) {
 		// Loop progress and cooperative clock polling use the existing CFG
@@ -395,8 +412,16 @@ func (c *migrationSSAContext) analyze() migrationSSAResult {
 		summary := c.summary()
 		for _, reason := range summary.reasons {
 			result.reasons.add(reason)
+			if result.scoped != nil {
+				// A retained function summary cannot separate outer cleanup
+				// from the proposed scope. Preserve it conservatively.
+				result.scoped.reasons.add(reason)
+			}
 		}
 		result.timer = result.timer || summary.timer
+		if result.scoped != nil {
+			result.scoped.timer = result.scoped.timer || summary.timer
+		}
 		for _, block := range c.function.Blocks {
 			if branch, ok := block.Instrs[len(block.Instrs)-1].(*ssa.If); ok && branch.Cond.Pos().IsValid() {
 				c.machine.proofs[branch.Cond.Pos()] |= 1

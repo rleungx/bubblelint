@@ -106,6 +106,7 @@ type checker struct {
 	objectReferences  map[ast.Expr]int
 	contextProofs     map[*ast.BlockStmt][]migrationSSAProof
 	contextNotes      map[*ast.BlockStmt][]analysis.RelatedInformation
+	reviewScopes      map[*ast.BlockStmt]*migrationReviewScope
 }
 
 func newChecker(pass *analysis.Pass, checks checkSet) *checker {
@@ -411,6 +412,7 @@ func (c *checker) testContext(expr ast.Expr, s state) (testContext, bool) {
 }
 
 func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testContext) bool {
+	reviewCaller := !s.suppressMigration
 	if c.checks&(migrationChecks|checkST102) != 0 && !s.bubble && !s.suppressMigration {
 		s.suppressMigration = c.migrationBarriers[fn.body]
 	}
@@ -470,7 +472,8 @@ func (c *checker) invoke(fn function, s state, args []ast.Expr, callbackT *testC
 	}
 	// Seed the result before descending so recursive helpers terminate.
 	c.visited[key] = s.async
-	if c.checks&checkST102 != 0 && !s.bubble && !s.background && !s.suppressMigration && len(s.tests) != 0 {
+	if c.checks&checkST102 != 0 && !s.bubble && !s.background && reviewCaller && len(s.tests) != 0 &&
+		(!s.suppressMigration || c.reviewScopes[fn.body] != nil) {
 		c.findReviewCandidates(fn.body, s)
 	}
 	c.findMigrationTimeouts(fn.body, s)
@@ -625,6 +628,12 @@ func (c *checker) report(node ast.Node, code, message string, fixes ...analysis.
 	var related []analysis.RelatedInformation
 	if code == "ST100" || code == "ST101" || code == "ST102" {
 		related = append(c.migrationEntryInformation(node), c.migrationContextInformation(node)...)
+	}
+	if code == "ST102" {
+		if scope := c.reviewScope(node); scope != nil {
+			message += "; keep the leading defers outside the proposed bubble"
+			related = append(related, scope.information()...)
+		}
 	}
 	c.pass.Report(analysis.Diagnostic{
 		Pos: node.Pos(), End: node.End(), Category: code, Message: code + ": " + message,

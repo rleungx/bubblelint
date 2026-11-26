@@ -322,6 +322,11 @@ func (c *checker) migrationInvocationEffects(body *ast.BlockStmt, call *ast.Call
 				add(effectTesting, "this testing API is unavailable on the bubble's *testing.T")
 				return nil
 			}
+		case "testing/synctest":
+			if fn.Name() == "Test" || fn.Name() == "Run" {
+				add(effectTesting, "this path already starts a synctest bubble and cannot be nested")
+				return nil
+			}
 		case "sync":
 			if fn.Name() == "Lock" || fn.Name() == "RLock" {
 				add(effectMutex, "mutex contention and progress have not been established")

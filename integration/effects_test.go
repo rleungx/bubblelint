@@ -209,6 +209,108 @@ func TestCLIMigrationSSA(t *testing.T) {
 	})
 }
 
+func TestCLIMigrationBoundaries(t *testing.T) {
+	if *cliBinary == "" {
+		t.Skip("run make integration to test the standalone binary")
+	}
+	module := t.TempDir()
+	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module migrationboundary\n\ngo 1.26.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repositoryRoot(t), "testdata", "src", "migrationboundary", "boundary_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(module, "boundary_test.go")
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit := runCommand(t, module, *cliBinary, "-checks=ST100,ST101,ST102", "-explain-migration", "-json", ".")
+	if exit != 0 {
+		t.Fatalf("boundary scan failed: exit=%d\n%s%s", exit, stdout, stderr)
+	}
+	var result map[string]map[string][]struct {
+		Category string
+		Related  []struct{ Posn, Message string }
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	starts := make(map[string]int)
+	for _, analyzers := range result {
+		for _, diagnostic := range analyzers["bubblelint"] {
+			if diagnostic.Category != "ST102" {
+				continue
+			}
+			name, line := "", 0
+			for _, related := range diagnostic.Related {
+				if entry, ok := strings.CutPrefix(related.Message, "test entry: "); ok {
+					name = entry
+				}
+				if related.Message == "proposed bubble starts here" {
+					position := strings.TrimPrefix(related.Posn, target+":")
+					value, _, _ := strings.Cut(position, ":")
+					line, err = strconv.Atoi(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if name == "" || line == 0 {
+				t.Fatalf("missing executable boundary: %+v", diagnostic)
+			}
+			starts[name] = line
+		}
+	}
+	if len(starts) != 2 {
+		t.Fatalf("got %d boundaries, want 2\n%s", len(starts), stdout)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, target, data, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped := 0
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || starts[fn.Name.Name] == 0 {
+			continue
+		}
+		for index, statement := range fn.Body.List {
+			if fset.Position(statement.Pos()).Line != starts[fn.Name.Name] {
+				continue
+			}
+			statements := append([]ast.Stmt(nil), fn.Body.List[index:]...)
+			callback := &ast.FuncLit{Type: fn.Type, Body: &ast.BlockStmt{List: statements}}
+			fn.Body.List = append(fn.Body.List[:index], &ast.ExprStmt{X: &ast.CallExpr{
+				Fun:  &ast.SelectorExpr{X: ast.NewIdent("synctest"), Sel: ast.NewIdent("Test")},
+				Args: []ast.Expr{ast.NewIdent("t"), callback},
+			}})
+			wrapped++
+			break
+		}
+	}
+	if wrapped != len(starts) {
+		t.Fatalf("wrapped %d boundaries, want %d", wrapped, len(starts))
+	}
+	var source bytes.Buffer
+	if err := format.Node(&source, fset, file); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, source.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"test", ".", "-run", "^TestOuter(Cleanup|Closure)$", "-count=25"},
+		{"test", "-race", ".", "-run", "^TestOuter(Cleanup|Closure)$", "-count=5"},
+	} {
+		stdout, stderr, exit := runCommand(t, module, "go", args...)
+		if exit != 0 {
+			t.Fatalf("reported boundary failed: exit=%d\n%s%s", exit, stdout, stderr)
+		}
+	}
+}
+
 func TestCLIMigrationProtocol(t *testing.T) {
 	if *cliBinary == "" {
 		t.Skip("run make integration to test the standalone binary")

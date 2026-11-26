@@ -109,7 +109,7 @@ func TestOtherRules(t *testing.T) {
 	})
 	ch := make(chan bool)
 	go func() { ch <- true }()
-	time.Sleep(time.Second) // want "ST100:"
+	time.Sleep(time.Second)
 	select {
 	case <-ch:
 	case <-time.After(time.Second):
